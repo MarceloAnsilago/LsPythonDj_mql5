@@ -43,6 +43,12 @@ class MissingQuoteLog(models.Model):
 class QuoteLive(models.Model):
     asset = models.OneToOneField("acoes.Asset", on_delete=models.CASCADE, related_name="live_quote")
     price = models.FloatField()
+    bid = models.FloatField(null=True, blank=True)
+    ask = models.FloatField(null=True, blank=True)
+    last = models.FloatField(null=True, blank=True)
+    as_of = models.DateTimeField(null=True, blank=True)
+    source = models.CharField(max_length=32, default="mt5")
+    volume = models.BigIntegerField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

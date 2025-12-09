@@ -4,6 +4,7 @@ from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.db.models import Prefetch, Q
@@ -98,12 +99,15 @@ def _build_home_operations_payload(request):
 
     yahoo_price_cache: dict[str, tuple[Decimal | None, bool]] = {}
     manual_refresh_required = False
+    use_mt5_live = getattr(settings, "USE_MT5_LIVE", False)
 
     def _normalize_ticker(value: str | None) -> str:
         return (value or "").strip().upper()
 
     def _try_fetch_yahoo_price(ticker_norm: str) -> tuple[Decimal | None, bool]:
         if not ticker_norm:
+            return None, False
+        if use_mt5_live:
             return None, False
         cached = yahoo_price_cache.get(ticker_norm)
         if cached is not None:
@@ -128,6 +132,8 @@ def _build_home_operations_payload(request):
     ):
         nonlocal manual_refresh_required
         if not asset:
+            return current_price, current_updated
+        if use_mt5_live:
             return current_price, current_updated
         if not force and current_price is not None:
             return current_price, current_updated
@@ -240,17 +246,19 @@ def _build_home_operations_payload(request):
                     except (TypeError, ValueError):
                         current_zscore = None
 
-        def _build_live_price(asset):
-            quote = getattr(asset, "live_quote", None) if asset else None
-            if quote and quote.price is not None:
+    def _build_live_price(asset):
+        quote = getattr(asset, "live_quote", None) if asset else None
+        price = None
+        updated = None
+        if quote:
+            raw_price = quote.price if quote.price is not None else getattr(quote, "last", None)
+            if raw_price is not None:
                 try:
-                    price = Decimal(str(quote.price))
+                    price = Decimal(str(raw_price))
                 except (TypeError, ValueError):
                     price = None
-            else:
-                price = None
-            updated = getattr(quote, "updated_at", None) if quote else None
-            return price, updated
+            updated = getattr(quote, "as_of", None) or getattr(quote, "updated_at", None)
+        return price, updated
 
         sell_live_price, sell_updated = _build_live_price(operation.sell_asset)
         sell_live_price, sell_updated = _refresh_live_price_with_yahoo(
@@ -965,25 +973,30 @@ def _source_label(src: str | None) -> str:
         return "Yahoo (agora)"
     if src == "cache":
         return "Yahoo (cache)"
+    if src == "mt5":
+        return "MT5"
     return ""
 
 
 def _build_current_asset_price(asset: Asset | None) -> tuple[Decimal | None, object | None, str | None]:
     if not asset:
         return None, None, None
+    use_mt5_live = getattr(settings, "USE_MT5_LIVE", False)
     price: Decimal | None = None
     updated = None
     source = None
     live_quote = getattr(asset, "live_quote", None)
-    if live_quote and live_quote.price is not None:
-        try:
-            price = Decimal(str(live_quote.price))
-        except (TypeError, ValueError, InvalidOperation):
-            price = None
-        else:
-            updated = getattr(live_quote, "updated_at", None)
-            source = "cache"
-    if price is None:
+    if live_quote:
+        raw_price = live_quote.price if live_quote.price is not None else getattr(live_quote, "last", None)
+        if raw_price is not None:
+            try:
+                price = Decimal(str(raw_price))
+            except (TypeError, ValueError, InvalidOperation):
+                price = None
+            else:
+                source = getattr(live_quote, "source", None) or "cache"
+        updated = getattr(live_quote, "as_of", None) or getattr(live_quote, "updated_at", None)
+    if price is None and not use_mt5_live:
         ticker = (getattr(asset, "ticker", "") or "").strip().upper()
         if ticker:
             yahoo_price = None
@@ -1112,6 +1125,7 @@ def operacoes(request):
 
     def _build_trade_info(role: str, asset: Asset | None, ticker: str) -> dict[str, str | float | bool | None]:
         ticker_norm = _normalize_ticker(ticker)
+        use_mt5_live = getattr(settings, "USE_MT5_LIVE", False)
         asset_obj = asset or _get_asset(ticker_norm)
 
         price = None
@@ -1120,14 +1134,17 @@ def operacoes(request):
 
         live_quote = getattr(asset_obj, "live_quote", None) if asset_obj else None
         if live_quote:
-            price = getattr(live_quote, "price", None)
-            updated_at = getattr(live_quote, "updated_at", None)
+            raw_price = getattr(live_quote, "price", None)
+            if raw_price is None:
+                raw_price = getattr(live_quote, "last", None)
+            price = raw_price
+            updated_at = getattr(live_quote, "as_of", None) or getattr(live_quote, "updated_at", None)
             if price is not None:
-                price_source = "cache"
+                price_source = getattr(live_quote, "source", None) or "cache"
 
         yahoo_price = None
         yahoo_error = False
-        if ticker_norm:
+        if ticker_norm and not use_mt5_live:
             try:
                 yahoo_price = fetch_latest_price(ticker_norm)
             except Exception:
@@ -1166,6 +1183,8 @@ def operacoes(request):
                 if price_source == "yahoo"
                 else "Yahoo (ultima leitura)"
                 if price_source == "cache"
+                else "MT5"
+                if price_source == "mt5"
                 else "Histórico (fechamento)"
                 if price_source == "daily"
                 else ""
@@ -1176,7 +1195,9 @@ def operacoes(request):
         }
 
         if price is None and ticker_norm:
-            if yahoo_error:
+            if use_mt5_live:
+                info["error_label"] = "Sem cotacao MT5 disponivel para este ticker."
+            elif yahoo_error:
                 info["error_label"] = "Nao foi possivel contatar o Yahoo Finance agora."
             else:
                 info["error_label"] = "Yahoo nao retornou cotacao para este ticker."

@@ -30,6 +30,13 @@ def _env_hosts(key: str, default: str) -> list[str]:
     return [host.strip() for host in raw.split(",") if host.strip()]
 
 
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.environ.get(key, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
 # Quick-start development settings - unsuitable for production
 
 # SECURITY WARNING: keep the secret key used in production secret!
@@ -48,6 +55,11 @@ CSRF_TRUSTED_ORIGINS = _env_hosts(
     "https://lspythondj.fly.dev,https://*.fly.dev",
 )
 
+USE_MT5_LIVE = _env_bool("USE_MT5_LIVE", False)
+USE_YAHOO_HISTORY = _env_bool("USE_YAHOO_HISTORY", False)
+MT5_API_KEY = os.environ.get("MT5_API_KEY")
+MT5_ALLOWED_IPS = _env_hosts("MT5_ALLOWED_IPS", "127.0.0.1")
+MT5_DEFAULT_CAPITAL = _env_float("MT5_DEFAULT_CAPITAL", 50000.0)
 
 # Application definition
 
@@ -74,6 +86,8 @@ INSTALLED_APPS = [
 
     # Autenticação
     'accounts',
+
+    'mt5api',
 ]
 
 

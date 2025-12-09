@@ -7,6 +7,7 @@ from typing import Iterable, Optional, Callable
 import pandas as pd
 import requests
 import yfinance as yf
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Max
 from django.utils import timezone
@@ -95,6 +96,8 @@ BULK_BATCH_SIZE = 1000  # flush para nao acumular objetos em memoria
 
 
 def _safe_float(value: object) -> float | None:
+    if getattr(settings, "USE_MT5_LIVE", False):
+        return None
     try:
         if value is None:
             return None
@@ -193,6 +196,11 @@ def bulk_update_quotes(
 
     Retorna: (n_ativos_com_insercao, n_linhas_inseridas)
     """
+    if not getattr(settings, "USE_YAHOO_HISTORY", False):
+        if progress_cb:
+            progress_cb("disabled", 0, 0, "yahoo_disabled", 0)
+        return 0, 0
+
     assets = list(assets)
     total_assets = len(assets)
     today = timezone.localdate()
@@ -339,11 +347,58 @@ def bulk_update_quotes(
 # ============================================================
 from cotacoes.models import QuoteLive
 
+
+def apply_live_quote(
+    asset,
+    *,
+    bid: float | None = None,
+    ask: float | None = None,
+    last: float | None = None,
+    price: float | None = None,
+    as_of=None,
+    source: str = "mt5",
+):
+    """
+    Atualiza QuoteLive com dados externos (ex.: MT5) e retorna o preÇõ salvo.
+    """
+    px = _safe_float(price) or _safe_float(last)
+    if px is None and bid is not None and ask is not None:
+        try:
+            px = (float(bid) + float(ask)) / 2.0
+        except Exception:
+            px = None
+    if px is None:
+        return None
+
+    when = as_of
+    if when is None:
+        when = timezone.now()
+    else:
+        try:
+            if timezone.is_naive(when):
+                when = timezone.make_aware(when, timezone.utc)
+        except Exception:
+            when = timezone.now()
+
+    defaults = {
+        "price": px,
+        "bid": _safe_float(bid),
+        "ask": _safe_float(ask),
+        "last": _safe_float(last) or px,
+        "as_of": when,
+        "source": source or "mt5",
+    }
+    QuoteLive.objects.update_or_create(asset=asset, defaults=defaults)
+    return px
+
+
 def fetch_latest_price(ticker: str) -> Optional[float]:
     """
     Retorna o último preço (quase em tempo real) do Yahoo Finance.
     Intervalo de 5m, atraso típico de ~15 minutos.
     """
+    if getattr(settings, "USE_MT5_LIVE", False) or not getattr(settings, "USE_YAHOO_HISTORY", False):
+        return None
     try:
         sym = _yf_symbol(ticker)
         df = yf.download(
@@ -365,6 +420,12 @@ def update_live_quotes(assets: Iterable, progress_cb: ProgressCB = None) -> tupl
     """
     Atualiza (ou cria) cotações em tempo real (tabela QuoteLive).
     """
+    if getattr(settings, "USE_MT5_LIVE", False):
+        total = len(list(assets))
+        if progress_cb:
+            progress_cb("mt5_live_mode", total, total, "mt5_only", 0)
+        return 0, total
+
     assets = list(assets)
     total = len(assets)
     updated = 0
@@ -403,6 +464,8 @@ def update_single_asset(ticker_b3: str, period: str = "2y", interval: str = "1d"
     Atualiza um único ticker (string) sem precisar montar queryset.
     Útil para depuração pontual no shell.
     """
+    if not getattr(settings, "USE_YAHOO_HISTORY", False):
+        return 0, 0
     from acoes.models import Asset
     asset = Asset.objects.filter(ticker=ticker_b3.upper()).first()
     if not asset:
@@ -546,6 +609,9 @@ def try_fill_missing_for_asset(
     Baixa um bloco (Yahoo; Stooq opcional) e insere apenas as faltantes.
     Retorna: (n_inseridos, restantes).
     """
+    if not getattr(settings, "USE_YAHOO_HISTORY", False):
+        return 0, sorted(missing_dates)
+
     if not missing_dates:
         return 0, []
 
@@ -668,6 +734,8 @@ def _date_to_unix(d: date) -> int:
 
 def try_fetch_single_date(asset, d: date, *, use_stooq: bool = True) -> bool:
     """Tenta inserir apenas a data d para o ativo."""
+    if not getattr(settings, "USE_YAHOO_HISTORY", False):
+        return False
     # 1) Yahoo
     try:
         df = yf.download(

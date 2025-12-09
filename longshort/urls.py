@@ -12,6 +12,7 @@ urlpatterns = [
 
     path("acoes/", include("acoes.urls")),
     path("cotacoes/", include("cotacoes.urls")),
+    path("api/mt5/", include(("mt5api.urls", "mt5api"), namespace="mt5api")),
 
     path("pares/", include(("pairs.urls", "pairs"), namespace="pairs")),
 
