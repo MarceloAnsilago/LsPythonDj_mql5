@@ -13,6 +13,7 @@ from django.views.decorators.http import require_http_methods
 
 from acoes.models import Asset
 from cotacoes.models import QuoteDaily, QuoteLive
+from .models import LiveTick
 from longshort.services.metrics import compute_pair_window_metrics, calcular_proporcao_long_short
 from pairs.constants import DEFAULT_BASE_WINDOW, DEFAULT_ZSCORE_ABS_MIN, DEFAULT_HALF_LIFE_MAX
 from pairs.models import Pair
@@ -144,16 +145,25 @@ def push_live_quote(request):
     as_of = _parse_as_of(data.get("as_of"))
     source = (data.get("source") or "mt5").lower()
 
+    recorded_last = last if last is not None else price
+
     QuoteLive.objects.update_or_create(
         asset=asset,
         defaults={
             "price": price,
             "bid": bid,
             "ask": ask,
-            "last": last if last is not None else price,
+            "last": recorded_last,
             "as_of": as_of,
             "source": source,
         },
+    )
+
+    LiveTick.objects.create(
+        ticker=asset.ticker,
+        bid=bid,
+        ask=ask,
+        last=recorded_last,
     )
 
     return JsonResponse(
