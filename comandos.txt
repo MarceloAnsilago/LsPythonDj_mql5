@@ -7,6 +7,8 @@ flyctl deploy -a lspythondj
 LongShortDjango
 
 
-celosmg1@gmail.com
-Admin
-J4!v9tQ2#Lm8sWX0
+Adm
+adminadmin
+
+
+python manage.py runserver 127.0.0.1:80
