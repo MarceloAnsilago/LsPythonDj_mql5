@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from types import SimpleNamespace
 from urllib.parse import quote_plus
+import re
 import pandas as pd
 
 from django.contrib import messages
@@ -26,7 +27,20 @@ from longshort.services.quotes import (
     scan_all_assets_and_fix,
     find_missing_dates_for_asset,
     try_fetch_single_date,
+    ensure_min_history_for_all_assets,
+    persist_today_from_live_quotes,
 )
+
+
+def _normalize_ticker_list(raw: str) -> list[str]:
+    parts = re.split(r"[\\s,]+", raw or "")
+    out: list[str] = []
+    for p in parts:
+        t = p.strip().upper()
+        if t and t not in out:
+            out.append(t)
+    return out
+
 def _fetch_unified_daily_df() -> pd.DataFrame:
     """
     Retorna DataFrame com colunas (date, ticker, close) unificando
@@ -53,9 +67,14 @@ def _fetch_unified_daily_df() -> pd.DataFrame:
 
 
 def _build_pivot_context(request: HttpRequest, max_rows: int = 90):
+    raw_filter = (request.GET.get("tickers") or "").strip() if request else ""
+    filter_list = _normalize_ticker_list(raw_filter)
+
     df = _fetch_unified_daily_df()
+    if filter_list:
+        df = df[df["ticker"].isin(filter_list)]
     if df.empty:
-        return {"cols": [], "rows": []}
+        return {"cols": filter_list, "rows": [], "filter_raw": raw_filter, "filter_list": filter_list}
     df_pivot = (
         df.pivot(index="date", columns="ticker", values="close")
           .sort_index(ascending=False)
@@ -64,13 +83,15 @@ def _build_pivot_context(request: HttpRequest, max_rows: int = 90):
     if max_rows:
         df_pivot = df_pivot.head(max_rows)
     cols = list(df_pivot.columns)
+    if filter_list:
+        cols = [c for c in filter_list if c in df_pivot.columns]
     rows = []
     for dt, row in df_pivot.iterrows():
         rows.append({
             "date": dt,
             "values": [("" if pd.isna(row[c]) else float(row[c])) for c in cols],
         })
-    return {"cols": cols, "rows": rows}
+    return {"cols": cols, "rows": rows, "filter_raw": raw_filter, "filter_list": filter_list}
 
 
 
@@ -90,26 +111,10 @@ class QuotesHomeView(LoginRequiredMixin, TemplateView):
             ]
         ctx["logs"] = MissingQuoteLog.objects.order_by("-created_at")[:20]
 
-        if df_all.empty:
-            ctx["pivot_cols"] = []
-            ctx["pivot_rows"] = []
-            return ctx
-
-        pivot = (
-            df_all.pivot(index="date", columns="ticker", values="close")
-                 .sort_index(ascending=False)
-                 .head(60)
-                 .round(2)
-        )
-        cols = list(pivot.columns)
-        rows = []
-        for idx, row in pivot.iterrows():
-            rows.append({
-                "date": idx,
-                "values": [None if pd.isna(row[c]) else float(row[c]) for c in cols],
-            })
-        ctx["pivot_cols"] = cols
-        ctx["pivot_rows"] = rows
+        pivot_ctx = _build_pivot_context(self.request, max_rows=60)
+        ctx["pivot_cols"] = pivot_ctx["cols"]
+        ctx["pivot_rows"] = pivot_ctx["rows"]
+        ctx["ticker_filter"] = pivot_ctx["filter_raw"]
         return ctx
 
 
@@ -122,15 +127,33 @@ class QuoteDailyListView(LoginRequiredMixin, ListView):
 
 @login_required
 def update_quotes(request: HttpRequest):
-    assets = Asset.objects.filter(is_active=True, use_mt5=False).order_by("id")
-    n_assets, n_rows = bulk_update_quotes(assets, period="2y", interval="1d")
-    messages.success(request, f"Cotações atualizadas: {n_assets} ativos, {n_rows} linhas inseridas.")
+    assets_seeded, rows_seeded = ensure_min_history_for_all_assets()
+
+    base_assets = Asset.objects.filter(is_active=True, use_mt5=False).order_by("id")
+    n_base_assets, n_base_rows = bulk_update_quotes(base_assets, period="2y", interval="1d")
+
+    mt5_assets = Asset.objects.filter(is_active=True, use_mt5=True).order_by("id")
+    n_mt5_assets, n_mt5_rows = persist_today_from_live_quotes(mt5_assets)
+
+    total_rows = rows_seeded + n_base_rows + n_mt5_rows
+
+    messages.success(
+        request,
+        f"Histórico garantido (200 barras mín.): {assets_seeded} ativos / {rows_seeded} linhas; "
+        f"Cotações salvas: {n_base_assets} ativos históricos, {n_base_rows} linhas; "
+        f"{n_mt5_assets} ativos MT5 atualizados hoje ({n_mt5_rows} linhas). "
+        f"Total inserido: {total_rows} linhas."
+    )
     return redirect(reverse_lazy("cotacoes:home"))
 
 def quotes_pivot(request: HttpRequest):
     pivot_ctx = _build_pivot_context(request, max_rows=None)  # ✅ passa request
     return render(request, "cotacoes/quote_pivot.html",
-                  {"cols": pivot_ctx["cols"], "data": pivot_ctx["rows"]})
+                  {
+                      "cols": pivot_ctx["cols"],
+                      "data": pivot_ctx["rows"],
+                      "ticker_filter": pivot_ctx["filter_raw"],
+                  })
 
 
 
@@ -161,16 +184,30 @@ def quotes_progress(request: HttpRequest):
 @login_required
 @require_POST
 def update_quotes_ajax(request: HttpRequest):
-    assets = Asset.objects.filter(is_active=True, use_mt5=False).order_by("id")
+    assets_seeded, rows_seeded = ensure_min_history_for_all_assets()
+
+    base_assets = Asset.objects.filter(is_active=True, use_mt5=False).order_by("id")
 
     def progress_cb(sym: str, idx: int, total: int, status: str, rows: int):
         _progress_set(request.user.id, ticker=sym, index=idx, total=total, status=status, rows=rows)
 
-    _progress_set(request.user.id, ticker="", index=0, total=assets.count(), status="starting", rows=0)
-    n_assets, n_rows = bulk_update_quotes(assets, period="2y", interval="1d", progress_cb=progress_cb)
-    messages.success(request, f"Cotações atualizadas: {n_assets} ativos, {n_rows} linhas inseridas.")
-    _progress_set(request.user.id, ticker="", index=n_assets, total=assets.count(), status="done", rows=n_rows)
-    return JsonResponse({"ok": True, "assets": n_assets, "rows": n_rows})
+    _progress_set(request.user.id, ticker="", index=0, total=base_assets.count(), status="starting", rows=0)
+    n_base_assets, n_base_rows = bulk_update_quotes(base_assets, period="2y", interval="1d", progress_cb=progress_cb)
+
+    mt5_assets = Asset.objects.filter(is_active=True, use_mt5=True).order_by("id")
+    n_mt5_assets, n_mt5_rows = persist_today_from_live_quotes(mt5_assets)
+
+    total_rows = rows_seeded + n_base_rows + n_mt5_rows
+
+    messages.success(
+        request,
+        f"Histórico garantido (200 barras mín.): {assets_seeded} ativos / {rows_seeded} linhas; "
+        f"Cotações salvas: {n_base_assets} ativos históricos, {n_base_rows} linhas; "
+        f"{n_mt5_assets} ativos MT5 atualizados hoje ({n_mt5_rows} linhas). "
+        f"Total inserido: {total_rows} linhas."
+    )
+    _progress_set(request.user.id, ticker="", index=n_base_assets, total=base_assets.count(), status="done", rows=total_rows)
+    return JsonResponse({"ok": True, "assets": n_base_assets, "rows": total_rows})
 
 
 @login_required

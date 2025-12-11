@@ -8,6 +8,24 @@
   </div>
   <div class="card">
     <div class="card-body">
+      <form method="get" class="row g-2 align-items-center mb-3">
+        <div class="col-sm-8 col-md-9">
+          <input type="text"
+                 name="tickers"
+                 class="form-control form-control-sm"
+                 placeholder="ABEV3, ALOS3"
+                 value="{{ ticker_filter|default:'' }}">
+        </div>
+        <div class="col-sm-4 col-md-3 d-flex gap-2">
+          <button type="submit" class="btn btn-sm btn-primary w-100">Filtrar colunas</button>
+          {% if ticker_filter %}
+            <a class="btn btn-sm btn-outline-secondary" href="{% url 'cotacoes:pivot' %}">Limpar</a>
+          {% endif %}
+        </div>
+        <div class="col-12">
+          <small class="text-muted">Separe tickers por vírgula ou espaço. Ex.: ABEV3,ALOS3.</small>
+        </div>
+      </form>
       <div class="table-responsive">
         <table class="table table-bordered table-sm">
           <thead class="table-light">

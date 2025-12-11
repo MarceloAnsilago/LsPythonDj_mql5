@@ -164,6 +164,9 @@ else:
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
             "NAME": _sqlite_path(DATABASE_URL),
+            "OPTIONS": {
+                "timeout": 30,  # aumenta timeout para reduzir "database is locked"
+            },
         }
     }
 

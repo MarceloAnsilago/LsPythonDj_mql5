@@ -14,7 +14,7 @@
         <a id="btnUpdate" class="btn btn-outline-primary" href="{% url 'cotacoes:update' %}">
           <span class="spinner-border spinner-border-sm me-2 d-none" id="spUpdate" role="status" aria-hidden="true"></span>
           <i class="bi bi-arrow-clockwise" id="icoUpdate"></i>
-          <span id="txtUpdate">Atualizar Cotações</span>
+          <span id="txtUpdate">Salvar cotações do dia</span>
         </a>
 
         <a class="btn btn-outline-info" href="{% url 'cotacoes:pivot' %}">
@@ -32,6 +32,24 @@
           <strong>Tabela de Cotações (Pivot)</strong>
         </div>
         <div class="card-body">
+          <form method="get" class="row g-2 align-items-center mb-3">
+            <div class="col-sm-8 col-md-9">
+              <input type="text"
+                     name="tickers"
+                     class="form-control form-control-sm"
+                     placeholder="ABEV3, ALOS3"
+                     value="{{ ticker_filter|default:'' }}">
+            </div>
+            <div class="col-sm-4 col-md-3 d-flex gap-2">
+              <button type="submit" class="btn btn-sm btn-primary w-100">Filtrar colunas</button>
+              {% if ticker_filter %}
+                <a class="btn btn-sm btn-outline-secondary" href="{% url 'cotacoes:home' %}">Limpar</a>
+              {% endif %}
+            </div>
+            <div class="col-12">
+              <small class="text-muted">Separe tickers por vírgula ou espaço. Ex.: ABEV3,ALOS3.</small>
+            </div>
+          </form>
           <div class="table-responsive" style="overflow-x:auto;">
             <table class="table table-bordered table-sm align-middle text-nowrap">
               <thead class="table-light">
@@ -133,7 +151,7 @@ document.addEventListener('DOMContentLoaded', function () {
     // mostra spinner e desabilita botão imediatamente
     sp.classList.remove('d-none');
     if (ico) ico.classList.add('d-none');
-    if (txt) txt.textContent = 'Atualizando...';
+    if (txt) txt.textContent = 'Salvando...';
     btn.classList.add('disabled');
     btn.setAttribute('aria-disabled', 'true');
   }, { passive: true });

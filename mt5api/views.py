@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Tuple
 
 from django.conf import settings
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
@@ -14,6 +14,7 @@ from django.views.decorators.http import require_http_methods
 from acoes.models import Asset
 from cotacoes.models import QuoteLive
 from longshort.services.price_provider import get_daily_prices
+from longshort.services.quotes import apply_live_quote
 from .models import LiveTick
 from longshort.services.metrics import compute_pair_window_metrics, calcular_proporcao_long_short
 from pairs.constants import DEFAULT_BASE_WINDOW, DEFAULT_ZSCORE_ABS_MIN, DEFAULT_HALF_LIFE_MAX
@@ -113,6 +114,21 @@ def _current_price(asset: Asset) -> Tuple[float | None, object | None, str | Non
 
 
 @csrf_exempt
+@require_http_methods(["GET"])
+def stream_assets(request):
+    auth_error = _ensure_api_auth(request)
+    if auth_error:
+        return auth_error
+
+    qs = Asset.objects.filter(is_active=True)
+    # qs = qs.filter(use_mt5=True)
+
+    tickers = [a.ticker.strip().upper() for a in qs if getattr(a, "ticker", "").strip()]
+    body = "\n".join(sorted(set(tickers)))
+    return HttpResponse(body, content_type="text/plain; charset=utf-8")
+
+
+@csrf_exempt
 @require_http_methods(["POST"])
 def push_live_quote(request):
     auth_error = _ensure_api_auth(request)
@@ -144,16 +160,14 @@ def push_live_quote(request):
 
     recorded_last = last if last is not None else price
 
-    QuoteLive.objects.update_or_create(
-        asset=asset,
-        defaults={
-            "price": price,
-            "bid": bid,
-            "ask": ask,
-            "last": recorded_last,
-            "as_of": as_of,
-            "source": source,
-        },
+    apply_live_quote(
+        asset,
+        bid=bid,
+        ask=ask,
+        last=last,
+        price=price,
+        as_of=as_of,
+        source=source,
     )
 
     LiveTick.objects.create(
