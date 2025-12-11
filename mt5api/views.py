@@ -12,7 +12,8 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from acoes.models import Asset
-from cotacoes.models import QuoteDaily, QuoteLive
+from cotacoes.models import QuoteLive
+from longshort.services.price_provider import get_daily_prices
 from .models import LiveTick
 from longshort.services.metrics import compute_pair_window_metrics, calcular_proporcao_long_short
 from pairs.constants import DEFAULT_BASE_WINDOW, DEFAULT_ZSCORE_ABS_MIN, DEFAULT_HALF_LIFE_MAX
@@ -84,15 +85,11 @@ def _resolve_asset(data: dict) -> Asset | None:
 
 
 def _latest_daily_price(asset: Asset) -> Tuple[float | None, object | None]:
-    row = (
-        QuoteDaily.objects.filter(asset=asset)
-        .values("close", "date")
-        .order_by("-date")
-        .first()
-    )
-    if not row:
+    prices = get_daily_prices(asset, end_date=timezone.localdate())
+    if not prices:
         return None, None
-    return _safe_float(row["close"]), row["date"]
+    last_row = prices[-1]
+    return _safe_float(last_row.get("close")), last_row.get("date")
 
 
 def _current_price(asset: Asset) -> Tuple[float | None, object | None, str | None]:

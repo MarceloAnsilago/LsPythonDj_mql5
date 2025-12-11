@@ -9,8 +9,8 @@ import logging
 from django.db import transaction
 
 from acoes.models import Asset
-from cotacoes.models import QuoteDaily
 from longshort.services.quotes import bulk_update_quotes
+from longshort.services.price_provider import get_daily_prices
 from pairs.models import Pair
 from pairs.services.scan import WindowRow, scan_pair_windows
 
@@ -55,21 +55,32 @@ def atualizar_cotacoes(
 
 def _sync_price_history(dia: date) -> dict[str, int]:
     """
-    Mantem a tabela PriceHistory alinhada com QuoteDaily para a data solicitada.
+    Mantem a tabela PriceHistory alinhada com a fonte diaria (QuoteDaily ou DailyPrice).
     """
-    quotes = list(QuoteDaily.objects.filter(date=dia).select_related("asset"))
+    assets = list(Asset.objects.filter(is_active=True))
     created = 0
     updated = 0
-    for quote in quotes:
+    records = 0
+
+    for asset in assets:
+        prices = get_daily_prices(asset, start_date=dia, end_date=dia)
+        if not prices:
+            continue
+        row = prices[-1]
+        close_px = row.get("close")
+        if close_px is None:
+            continue
+
         defaults = {
-            "close": Decimal(str(quote.close)),
-            "source": "QuoteDaily",
+            "close": Decimal(str(close_px)),
+            "source": "DailyPrice" if getattr(asset, "use_mt5", False) else "QuoteDaily",
         }
         _, was_created = PriceHistory.objects.update_or_create(
-            asset=quote.asset,
+            asset=asset,
             date=dia,
             defaults=defaults,
         )
+        records += 1
         if was_created:
             created += 1
         else:
@@ -77,13 +88,13 @@ def _sync_price_history(dia: date) -> dict[str, int]:
     LOGGER.info(
         "PriceHistory %s: registros=%d criados=%d atualizados=%d",
         dia,
-        len(quotes),
+        records,
         created,
         updated,
     )
     return {
         "date": dia.isoformat(),
-        "records": len(quotes),
+        "records": records,
         "created": created,
         "updated": updated,
     }

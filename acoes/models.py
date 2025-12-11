@@ -7,6 +7,7 @@ class Asset(models.Model):
     ticker_yf = models.CharField(max_length=20, blank=True, default="")
     name = models.CharField(max_length=100, blank=True, default="")
     is_active = models.BooleanField(default=True)
+    use_mt5 = models.BooleanField(default=False)
     logo_prefix = models.CharField(max_length=4, blank=True, default="")
 
     def __str__(self):

@@ -15,6 +15,8 @@ from statsmodels.tsa.stattools import adfuller
 # Modelos
 from acoes.models import Asset
 from cotacoes.models import QuoteDaily
+from mt5api.models import DailyPrice
+from longshort.services.price_provider import get_daily_prices
 
 # Util: half-life para OU discreto via regressão Δs_t = α + ρ s_{t-1} + ε
 def _half_life(spread: pd.Series) -> float | None:
@@ -51,6 +53,32 @@ def _last_corr(returns_a: pd.Series, returns_b: pd.Series, lookback: int) -> flo
     c = np.corrcoef(a.loc[idx].values, b.loc[idx].values)
     val = c[0, 1]
     return float(val) if np.isfinite(val) else None
+
+
+def _latest_daily_date() -> date:
+    """Última data conhecida considerando QuoteDaily e DailyPrice."""
+    qd_max = QuoteDaily.objects.aggregate(Max("date"))["date__max"]
+    mt5_max = DailyPrice.objects.aggregate(Max("date"))["date__max"]
+    candidates = [d for d in [qd_max, mt5_max] if d is not None]
+    if not candidates:
+        return timezone.localdate()
+    return max(candidates)
+
+
+def _df_from_provider(asset: Asset, lookback: int, window_end: date | None = None, column_name: str = "close") -> pd.DataFrame:
+    """
+    Busca preços diários via price_provider e devolve DataFrame com colunas [date, column_name],
+    já ordenado por data e limitado ao tail(lookback).
+    """
+    prices = get_daily_prices(asset, end_date=window_end)
+    if not prices:
+        return pd.DataFrame(columns=["date", column_name])
+    df = pd.DataFrame(prices)
+    if "close" not in df.columns:
+        return pd.DataFrame(columns=["date", column_name])
+    df = df[["date", "close"]].dropna()
+    df = df.sort_values("date").tail(lookback).rename(columns={"close": column_name})
+    return df
 
 
 @dataclass
@@ -92,18 +120,25 @@ def load_candles_for_universe_from_supabase(
         return CandleUniverse({})
 
     if window_end is None:
-        window_end = QuoteDaily.objects.aggregate(Max("date"))["date__max"]
-        window_end = window_end or timezone.localdate()
+        window_end = _latest_daily_date()
 
     lookback_days = max(1, lookback_windows * pad_factor)
     window_start = window_end - timedelta(days=lookback_days)
 
-    qs = (
-        QuoteDaily.objects.filter(asset_id__in=asset_ids, date__range=(window_start, window_end))
-        .values("asset_id", "date", "close")
-    )
+    assets_map = {a.id: a for a in Asset.objects.filter(id__in=asset_ids)}
+    rows: list[dict] = []
+    for asset_id, asset in assets_map.items():
+        prices = get_daily_prices(asset, start_date=window_start, end_date=window_end)
+        for row in prices:
+            rows.append(
+                {
+                    "asset_id": asset_id,
+                    "date": row["date"],
+                    "close": row["close"],
+                }
+            )
 
-    data = pd.DataFrame(list(qs))
+    data = pd.DataFrame(rows)
     if data.empty:
         return CandleUniverse({})
 
@@ -129,6 +164,7 @@ def compute_pair_window_metrics(
     # Carrega últimos 'window' candles **alinhados por data** (inner join)
     # Estratégia: puxa um pouco mais e faz o alinhamento em pandas.
     lookback = max(window * 2, 1)
+    latest_daily = _latest_daily_date()
 
     def _cached_asset_frame(asset_id: int, suffix: str) -> pd.DataFrame | None:
         if candles is None:
@@ -149,17 +185,8 @@ def compute_pair_window_metrics(
         df = _merge_frames(cached_left, cached_right)
 
     if df is None or df.empty:
-        ql = (QuoteDaily.objects
-              .filter(asset=left)
-              .values("date", "close")
-              .order_by("-date")[:lookback])
-        qr = (QuoteDaily.objects
-              .filter(asset=right)
-              .values("date", "close")
-              .order_by("-date")[:lookback])
-
-        df_l = pd.DataFrame(list(ql)).rename(columns={"close": "close_l"})
-        df_r = pd.DataFrame(list(qr)).rename(columns={"close": "close_r"})
+        df_l = _df_from_provider(left, lookback, window_end=latest_daily, column_name="close_l")
+        df_r = _df_from_provider(right, lookback, window_end=latest_daily, column_name="close_r")
         if df_l.empty or df_r.empty:
             return {"n_samples": 0}
 
@@ -492,17 +519,9 @@ def get_zscore_series(pair, window: int) -> list[tuple[pd.Timestamp, float]]:
     right = pair.right
 
     # Carrega candles a mais para garantir alinhamento e depois corta na janela
-    ql = (QuoteDaily.objects
-          .filter(asset=left)
-          .values("date", "close")
-          .order_by("-date")[:window*2])
-    qr = (QuoteDaily.objects
-          .filter(asset=right)
-          .values("date", "close")
-          .order_by("-date")[:window*2])
-
-    df_l = pd.DataFrame(list(ql)).rename(columns={"close": "close_l"})
-    df_r = pd.DataFrame(list(qr)).rename(columns={"close": "close_r"})
+    latest_daily = _latest_daily_date()
+    df_l = _df_from_provider(left, window * 2, window_end=latest_daily, column_name="close_l")
+    df_r = _df_from_provider(right, window * 2, window_end=latest_daily, column_name="close_r")
     if df_l.empty or df_r.empty:
         return []
 
@@ -547,17 +566,9 @@ def get_normalized_price_series(pair, window: int) -> list[tuple[pd.Timestamp, f
     left = pair.left
     right = pair.right
 
-    ql = (QuoteDaily.objects
-          .filter(asset=left)
-          .values("date", "close")
-          .order_by("-date")[:window * 2])
-    qr = (QuoteDaily.objects
-          .filter(asset=right)
-          .values("date", "close")
-          .order_by("-date")[:window * 2])
-
-    df_l = pd.DataFrame(list(ql)).rename(columns={"close": "close_l"})
-    df_r = pd.DataFrame(list(qr)).rename(columns={"close": "close_r"})
+    latest_daily = _latest_daily_date()
+    df_l = _df_from_provider(left, window * 2, window_end=latest_daily, column_name="close_l")
+    df_r = _df_from_provider(right, window * 2, window_end=latest_daily, column_name="close_r")
     if df_l.empty or df_r.empty:
         return []
 
@@ -601,17 +612,9 @@ def get_moving_beta_series(pair, window: int, beta_window: int = 5) -> list[tupl
     left = pair.left
     right = pair.right
 
-    ql = (QuoteDaily.objects
-          .filter(asset=left)
-          .values("date", "close")
-          .order_by("-date")[:window * 2])
-    qr = (QuoteDaily.objects
-          .filter(asset=right)
-          .values("date", "close")
-          .order_by("-date")[:window * 2])
-
-    df_l = pd.DataFrame(list(ql)).rename(columns={"close": "close_l"})
-    df_r = pd.DataFrame(list(qr)).rename(columns={"close": "close_r"})
+    latest_daily = _latest_daily_date()
+    df_l = _df_from_provider(left, window * 2, window_end=latest_daily, column_name="close_l")
+    df_r = _df_from_provider(right, window * 2, window_end=latest_daily, column_name="close_r")
     if df_l.empty or df_r.empty:
         return []
 

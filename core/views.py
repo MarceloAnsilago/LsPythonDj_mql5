@@ -17,7 +17,8 @@ from django.utils.formats import number_format
 from django.views.decorators.http import require_POST
 
 from acoes.models import Asset
-from cotacoes.models import QuoteDaily, QuoteLive
+from cotacoes.models import QuoteLive
+from longshort.services.price_provider import get_daily_prices
 from longshort.services.metrics import (
     compute_pair_window_metrics,
     calcular_proporcao_long_short,
@@ -628,6 +629,13 @@ def encerradas(request):
         .order_by("-updated_at")
     )
     total_closed = closed_qs.count()
+    asset_ids = set(
+        a
+        for pair in closed_qs.values_list("sell_asset_id", "buy_asset_id")
+        for a in pair
+        if a
+    )
+    asset_cache = {a.id: a for a in Asset.objects.filter(id__in=asset_ids)} if asset_ids else {}
     closing_price_cache: dict[tuple[int, object], Decimal | None] = {}
 
     def _fetch_price(asset_id: int | None, target_date):
@@ -636,13 +644,13 @@ def encerradas(request):
         cache_key = (asset_id, target_date)
         if cache_key in closing_price_cache:
             return closing_price_cache[cache_key]
-        quote = (
-            QuoteDaily.objects.filter(asset_id=asset_id, date__lte=target_date)
-            .order_by("-date")
-            .values_list("close", flat=True)
-            .first()
-        )
-        price = _decimal_from_value(quote)
+        asset_obj = asset_cache.get(asset_id)
+        price = None
+        if asset_obj:
+            prices = get_daily_prices(asset_obj, end_date=target_date)
+            if prices:
+                last_row = prices[-1]
+                price = _decimal_from_value(last_row.get("close"))
         closing_price_cache[cache_key] = price
         return price
 
@@ -975,6 +983,10 @@ def _source_label(src: str | None) -> str:
         return "Yahoo (cache)"
     if src == "mt5":
         return "MT5"
+    if src == "daily":
+        return "Historico (fechamento)"
+    if src == "daily_mt5":
+        return "DailyPrice (MT5)"
     return ""
 
 
@@ -1019,6 +1031,19 @@ def _build_current_asset_price(asset: Asset | None) -> tuple[Decimal | None, obj
                         )
                     except Exception:
                         pass
+    if price is None:
+        daily_prices = get_daily_prices(asset, end_date=timezone.localdate())
+        if daily_prices:
+            last_row = daily_prices[-1]
+            close_px = last_row.get("close")
+            if close_px is not None:
+                try:
+                    price = Decimal(str(close_px))
+                except (TypeError, ValueError, InvalidOperation):
+                    price = None
+                else:
+                    updated = last_row.get("date")
+                    source = "daily_mt5" if getattr(asset, "use_mt5", False) else "daily"
     return price, updated, source
 
 
@@ -1159,16 +1184,14 @@ def operacoes(request):
                 QuoteLive.objects.update_or_create(asset=asset_obj, defaults={"price": yahoo_price})
 
         if price is None and asset_obj:
-            latest_quote = (
-                QuoteDaily.objects.filter(asset=asset_obj)
-                .values("close", "date")
-                .order_by("-date")
-                .first()
-            )
-            if latest_quote and latest_quote["close"] is not None:
-                price = float(latest_quote["close"])
-                updated_at = latest_quote["date"]
-                price_source = "daily"
+            daily_prices = get_daily_prices(asset_obj, end_date=timezone.localdate())
+            if daily_prices:
+                last_row = daily_prices[-1]
+                close_px = last_row.get("close")
+                if close_px is not None:
+                    price = float(close_px)
+                    updated_at = last_row.get("date")
+                    price_source = "daily_mt5" if getattr(asset_obj, "use_mt5", False) else "daily"
 
         info = {
             "role": role,
@@ -1178,17 +1201,7 @@ def operacoes(request):
             "price": price,
             "price_label": f"R$ {number_format(price, 2)}" if price is not None else None,
             "source": price_source,
-            "source_label": (
-                "Yahoo (agora)"
-                if price_source == "yahoo"
-                else "Yahoo (ultima leitura)"
-                if price_source == "cache"
-                else "MT5"
-                if price_source == "mt5"
-                else "Histórico (fechamento)"
-                if price_source == "daily"
-                else ""
-            ),
+            "source_label": _source_label(price_source),
             "updated_label": _format_updated(updated_at),
             "error_label": "",
             "fetched_now": price_source == "yahoo",

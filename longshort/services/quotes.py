@@ -116,6 +116,8 @@ def _series_value_for_date(series: Optional[pd.Series], target_date) -> float | 
 
 
 def _update_daily_quote_close_if_changed(asset, quote_date, new_close) -> bool:
+    if getattr(asset, "use_mt5", False):
+        return False
     new_value = _safe_float(new_close)
     if new_value is None:
         return False
@@ -135,6 +137,8 @@ def _update_daily_quote_close_if_changed(asset, quote_date, new_close) -> bool:
 
 
 def ensure_today_placeholder(asset) -> None:
+    if getattr(asset, "use_mt5", False):
+        return
     """
     Se hoje for dia útil e ainda não existir QuoteDaily para hoje,
     cria uma linha provisória copiando o último fechamento conhecido.
@@ -226,6 +230,11 @@ def bulk_update_quotes(
         if not ticker:
             if progress_cb:
                 progress_cb("", idx, total_assets, "skip_invalid", 0)
+            continue
+        if getattr(asset, "use_mt5", False):
+            # Ativo controlado pelo MT5: não tenta atualizar via Yahoo/Stooq.
+            if progress_cb:
+                progress_cb(ticker, idx, total_assets, "mt5_mode", 0)
             continue
 
         if progress_cb:
@@ -565,6 +574,8 @@ def find_missing_dates_for_asset(
     since_months: int | None = None,
     until: date | None = None,
 ) -> list[date]:
+    if getattr(asset, "use_mt5", False):
+        return []
     """
     Datas faltantes (dias de negociação) em QuoteDaily para o ativo.
     - Se since_months for fornecido, limita a janela aos últimos N meses.
@@ -604,6 +615,8 @@ def try_fill_missing_for_asset(
     *,
     use_stooq: bool = False,
 ) -> tuple[int, list[date]]:
+    if getattr(asset, "use_mt5", False):
+        return 0, []
     """
     Tenta preencher datas faltantes para um ativo.
     Baixa um bloco (Yahoo; Stooq opcional) e insere apenas as faltantes.
@@ -703,15 +716,18 @@ def scan_all_assets_and_fix(
     tickers: list[str] | None = None,
 ):
     """
-    Varre ativos, tenta corrigir buracos e retorna lista serializável:
+    Varre ativos, tenta corrigir buracos e retorna lista serializavel:
     [{ticker, missing_before, fixed, remaining:[YYYY-MM-DD,...]}]
-    - since_months: limitar janela (p.ex. 18 = últimos 18 meses).
+    - since_months: limitar janela (p.ex. 18 = ultimos 18 meses).
     - tickers: filtrar um subconjunto (strings, ex.: ["BRFS3","PETR4"]).
+    - Ignora ativos com use_mt5=True (tratados via MT5/DailyPrice).
     """
     try:
         qs = Asset.objects.filter(is_active=True)
     except Exception:
         qs = Asset.objects.all()
+
+    qs = qs.filter(use_mt5=False)
 
     if tickers:
         qs = qs.filter(ticker__in=[t.upper() for t in tickers])
@@ -724,7 +740,7 @@ def scan_all_assets_and_fix(
             "ticker": getattr(asset, "ticker", ""),
             "missing_before": int(len(missing)),
             "fixed": int(fixed),
-            "remaining": [d.isoformat() for d in remaining],  # ✅ serializável
+            "remaining": [d.isoformat() for d in remaining],
         })
     return results
 
@@ -734,6 +750,8 @@ def _date_to_unix(d: date) -> int:
 
 def try_fetch_single_date(asset, d: date, *, use_stooq: bool = True) -> bool:
     """Tenta inserir apenas a data d para o ativo."""
+    if getattr(asset, "use_mt5", False):
+        return False
     if not getattr(settings, "USE_YAHOO_HISTORY", False):
         return False
     # 1) Yahoo

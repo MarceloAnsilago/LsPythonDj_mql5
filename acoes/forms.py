@@ -5,7 +5,7 @@ from .models import Asset
 class AssetForm(forms.ModelForm):
     class Meta:
         model = Asset
-        fields = ["ticker", "ticker_yf", "name", "is_active"]  # <-- sem logo_prefix
+        fields = ["ticker", "ticker_yf", "name", "is_active", "use_mt5"]  # <-- sem logo_prefix
 
     def clean_ticker(self):
         return (self.cleaned_data.get("ticker") or "").upper().strip()

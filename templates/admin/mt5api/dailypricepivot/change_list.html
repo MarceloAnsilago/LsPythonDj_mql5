@@ -1,0 +1,56 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+  <h1>DailyPrice Pivot</h1>
+
+  <form method="get" class="mb-3">
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
+      <div>
+        <label for="ticker">Ticker</label><br>
+        <input type="text" name="ticker" id="ticker" value="{{ filter_ticker }}" class="vTextField" style="width:120px;">
+      </div>
+      <div>
+        <label for="start">Data inicial</label><br>
+        <input type="date" name="start" id="start" value="{{ filter_start }}" class="vDateField">
+      </div>
+      <div>
+        <label for="end">Data final</label><br>
+        <input type="date" name="end" id="end" value="{{ filter_end }}" class="vDateField">
+      </div>
+      <div>
+        <button type="submit" class="button default">Filtrar</button>
+        <a href="{% url 'admin:mt5api_dailypricepivot_changelist' %}" class="button">Limpar</a>
+      </div>
+    </div>
+  </form>
+
+  <div class="results">
+    <div class="table-container" style="overflow-x:auto;">
+      <table class="listing">
+        <thead>
+          <tr>
+            <th>Data</th>
+            {% for col in pivot_cols %}
+              <th class="text-right">{{ col }}</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in pivot_rows %}
+            <tr>
+              <th>{{ row.date|date:"Y-m-d" }}</th>
+              {% for v in row.values %}
+                <td style="text-align:right;">{% if v is not None %}{{ v|floatformat:4 }}{% endif %}</td>
+              {% endfor %}
+            </tr>
+          {% empty %}
+            <tr>
+              <td colspan="{{ pivot_cols|length|add:'1' }}" style="text-align:center;">Nenhum dado encontrado para o filtro.</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from types import SimpleNamespace
 from urllib.parse import quote_plus
 import pandas as pd
 
@@ -16,7 +17,9 @@ from django.views.decorators.http import require_http_methods, require_GET, requ
 from django.views.generic import ListView, TemplateView
 
 from acoes.models import Asset
+from mt5api.models import DailyPrice
 from .models import QuoteDaily, MissingQuoteLog
+from longshort.services.price_provider import get_daily_prices
 
 from longshort.services.quotes import (
     bulk_update_quotes,
@@ -25,19 +28,37 @@ from longshort.services.quotes import (
     try_fetch_single_date,
     _date_to_unix,  # helper p/ montar link do Yahoo
 )
-
-@require_http_methods(["GET"])
+def _fetch_unified_daily_df() -> pd.DataFrame:
+    """
+    Retorna DataFrame com colunas (date, ticker, close) unificando
+    DailyPrice (MT5) e QuoteDaily. Para ativos use_mt5, faz fallback
+    para QuoteDaily se ainda nao houver DailyPrice.
+    """
+    rows: list[dict] = []
+    for asset in Asset.objects.all():
+        prices = get_daily_prices(asset, fallback_to_quote=True)
+        for item in prices:
+            rows.append(
+                {
+                    "date": item["date"],
+                    "ticker": asset.ticker,
+                    "close": item["close"],
+                }
+            )
+    if not rows:
+        return pd.DataFrame(columns=["date", "ticker", "close"])
+    df_all = pd.DataFrame(rows)
+    df_all["ticker"] = df_all["ticker"].str.upper()
+    df_all["date"] = pd.to_datetime(df_all["date"])
+    return df_all
 
 
 def _build_pivot_context(request: HttpRequest, max_rows: int = 90):
-    qs = QuoteDaily.objects.select_related("asset").order_by("-date")
-    if not qs.exists():
-        return {"cols": [], "rows": []}
-    df = pd.DataFrame(list(qs.values("date", "asset__ticker", "close")))
+    df = _fetch_unified_daily_df()
     if df.empty:
         return {"cols": [], "rows": []}
     df_pivot = (
-        df.pivot(index="date", columns="asset__ticker", values="close")
+        df.pivot(index="date", columns="ticker", values="close")
           .sort_index(ascending=False)
           .round(2)
     )
@@ -60,25 +81,26 @@ class QuotesHomeView(LoginRequiredMixin, TemplateView):
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
 
-        ctx["last_quotes"] = (
-            QuoteDaily.objects.select_related("asset")
-            .order_by("-date")[:30]
-        )
+        df_all = _fetch_unified_daily_df()
+        ctx["last_quotes"] = []
+        if not df_all.empty:
+            df_sorted = df_all.sort_values("date", ascending=False).head(30)
+            ctx["last_quotes"] = [
+                SimpleNamespace(ticker=row["ticker"], date=row["date"], close=row["close"])
+                for row in df_sorted.to_dict("records")
+            ]
         ctx["logs"] = MissingQuoteLog.objects.order_by("-created_at")[:20]
 
-        qs = QuoteDaily.objects.select_related("asset").order_by("date", "asset__ticker")
-        df = pd.DataFrame(list(qs.values("date", "asset__ticker", "close")))
-        if df.empty:
+        if df_all.empty:
             ctx["pivot_cols"] = []
             ctx["pivot_rows"] = []
             return ctx
 
-        df["date"] = pd.to_datetime(df["date"])
         pivot = (
-            df.pivot(index="date", columns="asset__ticker", values="close")
-              .sort_index(ascending=False)
-              .head(60)
-              .round(2)
+            df_all.pivot(index="date", columns="ticker", values="close")
+                 .sort_index(ascending=False)
+                 .head(60)
+                 .round(2)
         )
         cols = list(pivot.columns)
         rows = []
@@ -101,7 +123,7 @@ class QuoteDailyListView(LoginRequiredMixin, ListView):
 
 @login_required
 def update_quotes(request: HttpRequest):
-    assets = Asset.objects.filter(is_active=True).order_by("id")
+    assets = Asset.objects.filter(is_active=True, use_mt5=False).order_by("id")
     n_assets, n_rows = bulk_update_quotes(assets, period="2y", interval="1d")
     messages.success(request, f"Cotações atualizadas: {n_assets} ativos, {n_rows} linhas inseridas.")
     return redirect(reverse_lazy("cotacoes:home"))
@@ -140,7 +162,7 @@ def quotes_progress(request: HttpRequest):
 @login_required
 @require_POST
 def update_quotes_ajax(request: HttpRequest):
-    assets = Asset.objects.filter(is_active=True).order_by("id")
+    assets = Asset.objects.filter(is_active=True, use_mt5=False).order_by("id")
 
     def progress_cb(sym: str, idx: int, total: int, status: str, rows: int):
         _progress_set(request.user.id, ticker=sym, index=idx, total=total, status=status, rows=rows)

@@ -41,3 +41,12 @@ class DailyPrice(models.Model):
 
     def __str__(self) -> str:
         return f"{self.ticker} {self.date} O={self.open} H={self.high} L={self.low} C={self.close}"
+
+
+class DailyPricePivot(DailyPrice):
+    """Proxy para exibir pivot no admin."""
+
+    class Meta:
+        proxy = True
+        verbose_name = "DailyPrice Pivot"
+        verbose_name_plural = "DailyPrice Pivot"
