@@ -10,4 +10,3 @@ psycopg2-binary>=2.9
 scipy>=1.11
 statsmodels>=0.14
 whitenoise>=6.5
-yfinance>=0.2.40

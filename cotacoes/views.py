@@ -26,7 +26,6 @@ from longshort.services.quotes import (
     scan_all_assets_and_fix,
     find_missing_dates_for_asset,
     try_fetch_single_date,
-    _date_to_unix,  # helper p/ montar link do Yahoo
 )
 def _fetch_unified_daily_df() -> pd.DataFrame:
     """
@@ -177,8 +176,7 @@ def update_quotes_ajax(request: HttpRequest):
 @login_required
 def update_live_quotes_view(request: HttpRequest):
     """
-    View que atualiza os preços ao vivo (intervalo de 5 minutos via Yahoo Finance)
-    e salva na tabela cotacoes_quotelive.
+    View que atualiza os preços ao vivo via MT5 e salva na tabela cotacoes_quotelive.
     """
     from longshort.services.quotes import update_live_quotes
 
@@ -235,19 +233,15 @@ def faltantes_detail(request, ticker: str):
     asset = get_object_or_404(Asset, ticker=ticker.upper())
     # reescaneia só esse ativo pra pegar a lista atualizada
     missing = find_missing_dates_for_asset(asset)
-    # monta linhas com link pro Yahoo e ação de tentar baixar
+    # monta linhas com link de busca genérica (sem dependência externa específica)
     google_query = quote_plus(f"{ticker.upper()} SA")
     google_url = f"https://www.google.com/search?q={google_query}"
     rows = []
     for d in missing:
-        period1 = _date_to_unix(d)  # usa helper do services (ou recrie aqui)
-        period2 = _date_to_unix(d + timedelta(days=1))
-        yahoo_url = f"https://finance.yahoo.com/quote/{ticker.upper()}.SA/history?period1={period1}&period2={period2}"
         rows.append(
             {
                 "date": d,
                 "date_iso": d.isoformat(),
-                "yahoo_url": yahoo_url,
                 "google_url": google_url,
             }
         )

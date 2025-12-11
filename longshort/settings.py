@@ -53,8 +53,7 @@ CSRF_TRUSTED_ORIGINS = _env_hosts(
     "https://lspythondj.fly.dev,https://*.fly.dev",
 )
 
-USE_MT5_LIVE = _env_bool("USE_MT5_LIVE", False)
-USE_YAHOO_HISTORY = _env_bool("USE_YAHOO_HISTORY", False)
+USE_MT5_LIVE = _env_bool("USE_MT5_LIVE", True)
 MT5_API_KEY = os.environ.get("MT5_API_KEY")
 MT5_ALLOWED_IPS = _env_hosts("MT5_ALLOWED_IPS", "127.0.0.1")
 MT5_DEFAULT_CAPITAL = _env_float("MT5_DEFAULT_CAPITAL", 50000.0)
