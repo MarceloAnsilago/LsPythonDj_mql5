@@ -2,6 +2,18 @@
 from django.conf import settings
 from django.db import models
 
+# Mapeamentos especiais B3 -> Yahoo; None indica ignorar (delistado/sem cotacao).
+YF_TICKER_OVERRIDES: dict[str, str | None] = {
+    "CPFL3": "CPFE3.SA",
+    "CSN3": "CSNA3.SA",
+    "CCRO3": "CCRO3",      # sem .SA funciona melhor
+    "JBSS3": "JBSS3.BA",   # Yahoo usa cotacao em Buenos Aires
+    "BRFS3": None,
+    "CRFB3": None,
+    "STBP3": None,
+}
+
+
 class Asset(models.Model):
     ticker = models.CharField(max_length=10, unique=True)
     ticker_yf = models.CharField(max_length=20, blank=True, default="")
@@ -16,8 +28,28 @@ class Asset(models.Model):
     # ---------- SOMENTE NO ASSET ----------
     def _norm_logo_prefix(self, value: str | None) -> str:
         base = (value or self.ticker or "").upper()
-        letters = "".join(ch for ch in base if ch.isalpha())  # só letras
+        letters = "".join(ch for ch in base if ch.isalpha())  # sÇü letras
         return (letters[:4] or "SEML")
+
+    def _normalize_ticker_yf(self, raw: str | None = None) -> str:
+        """
+        Normaliza ticker do Yahoo aplicando mapeamentos antes da regra generica .SA.
+        Se o ticker estiver marcado como delistado (override None), retorna string vazia.
+        """
+        base = (self.ticker or "").strip().upper()
+        if not base:
+            return ""
+
+        if base in YF_TICKER_OVERRIDES:
+            mapped = YF_TICKER_OVERRIDES[base]
+            return (mapped or "").strip().upper()
+
+        candidate = (raw or self.ticker_yf or base).strip().upper()
+        if not candidate:
+            return ""
+        if "." not in candidate:
+            candidate = f"{candidate}.SA"
+        return candidate
 
     @property
     def logo_key(self) -> str:
@@ -25,11 +57,7 @@ class Asset(models.Model):
 
     def save(self, *args, **kwargs):
         self.logo_prefix = self._norm_logo_prefix(self.logo_prefix)
-        # completa YF com .SA se faltar
-        if self.ticker and not self.ticker_yf:
-            self.ticker_yf = self.ticker.upper()
-        if self.ticker_yf and "." not in self.ticker_yf:
-            self.ticker_yf = (self.ticker_yf or "").upper() + ".SA"
+        self.ticker_yf = self._normalize_ticker_yf(self.ticker_yf)
         return super().save(*args, **kwargs)
     # --------------------------------------
 
@@ -45,4 +73,4 @@ class UserAsset(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.user} ♥ {self.asset}"
+        return f"{self.user} ƒT¾ {self.asset}"

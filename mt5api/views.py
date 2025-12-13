@@ -7,12 +7,12 @@ from typing import Any, Tuple
 from django.conf import settings
 from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
+from django.utils.dateparse import parse_datetime, parse_date
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from acoes.models import Asset
-from cotacoes.models import QuoteLive
+from cotacoes.models import QuoteLive, QuoteDaily
 from longshort.services.price_provider import get_daily_prices
 from longshort.services.quotes import apply_live_quote
 from .models import LiveTick
@@ -121,7 +121,7 @@ def stream_assets(request):
         return auth_error
 
     qs = Asset.objects.filter(is_active=True)
-    # qs = qs.filter(use_mt5=True)
+    qs = qs.filter(use_mt5=True)
 
     tickers = [a.ticker.strip().upper() for a in qs if getattr(a, "ticker", "").strip()]
     body = "\n".join(sorted(set(tickers)))
@@ -184,6 +184,54 @@ def push_live_quote(request):
             "ticker": asset.ticker,
             "as_of": as_of.isoformat(),
             "received_at": timezone.now().isoformat(),
+        }
+    )
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def push_daily_candle(request):
+    """
+    Recebe OHLC D1 fechado do MT5 e grava em QuoteDaily.
+    Rejeita datas de hoje ou futuras.
+    """
+    auth_error = _ensure_api_auth(request)
+    if auth_error:
+        return auth_error
+
+    try:
+        body = request.body.decode("utf-8") if request.body else "{}"
+        data = json.loads(body or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"ok": False, "detail": "JSON invalido."}, status=400)
+
+    asset = _resolve_asset(data)
+    if not asset or not getattr(asset, "use_mt5", False):
+        return JsonResponse({"ok": False, "detail": "Ativo nao encontrado ou nao usa MT5."}, status=404)
+
+    ticker = asset.ticker.strip().upper()
+    target_date = parse_date(str(data.get("date")))
+    if target_date is None:
+        return JsonResponse({"ok": False, "detail": "Data invalida."}, status=400)
+    if target_date >= timezone.localdate():
+        return JsonResponse({"ok": False, "detail": "Apenas candles D1 fechados (date < hoje)."}, status=400)
+
+    c = _safe_float(data.get("close") or data.get("last") or data.get("price"))
+    if c is None:
+        return JsonResponse({"ok": False, "detail": "Preco de fechamento obrigatorio."}, status=400)
+
+    QuoteDaily.objects.update_or_create(
+        asset=asset,
+        date=target_date,
+        defaults={"close": c, "is_provisional": False},
+    )
+
+    return JsonResponse(
+        {
+            "ok": True,
+            "ticker": ticker,
+            "date": target_date.isoformat(),
+            "source": "mt5_push",
         }
     )
 

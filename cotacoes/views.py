@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 from types import SimpleNamespace
 from urllib.parse import quote_plus
 import re
@@ -18,17 +18,16 @@ from django.views.decorators.http import require_http_methods, require_GET, requ
 from django.views.generic import ListView, TemplateView
 
 from acoes.models import Asset
-from mt5api.models import DailyPrice
 from .models import QuoteDaily, MissingQuoteLog
 from longshort.services.price_provider import get_daily_prices
 
 from longshort.services.quotes import (
     bulk_update_quotes,
     scan_all_assets_and_fix,
+    persist_today_provisional_from_live_quotes,
     find_missing_dates_for_asset,
     try_fetch_single_date,
     ensure_min_history_for_all_assets,
-    persist_today_from_live_quotes,
 )
 
 
@@ -43,13 +42,12 @@ def _normalize_ticker_list(raw: str) -> list[str]:
 
 def _fetch_unified_daily_df() -> pd.DataFrame:
     """
-    Retorna DataFrame com colunas (date, ticker, close) unificando
-    DailyPrice (MT5) e QuoteDaily. Para ativos use_mt5, faz fallback
-    para QuoteDaily se ainda nao houver DailyPrice.
+    Retorna DataFrame com colunas (date, ticker, close) usando QuoteDaily.
+    Para ativos use_mt5, tambem usa QuoteDaily (preenchido via MT5 ou fallback Yahoo).
     """
     rows: list[dict] = []
     for asset in Asset.objects.all():
-        prices = get_daily_prices(asset, fallback_to_quote=True)
+        prices = get_daily_prices(asset, fallback_to_quote=False)
         for item in prices:
             rows.append(
                 {
@@ -133,21 +131,21 @@ def update_quotes(request: HttpRequest):
     n_base_assets, n_base_rows = bulk_update_quotes(base_assets, period="2y", interval="1d")
 
     mt5_assets = Asset.objects.filter(is_active=True, use_mt5=True).order_by("id")
-    n_mt5_assets, n_mt5_rows = persist_today_from_live_quotes(mt5_assets)
+    n_mt5_assets, n_mt5_rows = bulk_update_quotes(mt5_assets, period="2y", interval="1d")
 
     total_rows = rows_seeded + n_base_rows + n_mt5_rows
 
     messages.success(
         request,
         f"Histórico garantido (200 barras mín.): {assets_seeded} ativos / {rows_seeded} linhas; "
-        f"Cotações salvas: {n_base_assets} ativos históricos, {n_base_rows} linhas; "
-        f"{n_mt5_assets} ativos MT5 atualizados hoje ({n_mt5_rows} linhas). "
+        f"Cotações salvas (Yahoo): {n_base_assets} ativos, {n_base_rows} linhas; "
+        f"Cotações D1 MT5: {n_mt5_assets} ativos, {n_mt5_rows} linhas. "
         f"Total inserido: {total_rows} linhas."
     )
     return redirect(reverse_lazy("cotacoes:home"))
 
 def quotes_pivot(request: HttpRequest):
-    pivot_ctx = _build_pivot_context(request, max_rows=None)  # ✅ passa request
+    pivot_ctx = _build_pivot_context(request, max_rows=None)  # passa request
     return render(request, "cotacoes/quote_pivot.html",
                   {
                       "cols": pivot_ctx["cols"],
@@ -195,15 +193,15 @@ def update_quotes_ajax(request: HttpRequest):
     n_base_assets, n_base_rows = bulk_update_quotes(base_assets, period="2y", interval="1d", progress_cb=progress_cb)
 
     mt5_assets = Asset.objects.filter(is_active=True, use_mt5=True).order_by("id")
-    n_mt5_assets, n_mt5_rows = persist_today_from_live_quotes(mt5_assets)
+    n_mt5_assets, n_mt5_rows = bulk_update_quotes(mt5_assets, period="2y", interval="1d")
 
     total_rows = rows_seeded + n_base_rows + n_mt5_rows
 
     messages.success(
         request,
         f"Histórico garantido (200 barras mín.): {assets_seeded} ativos / {rows_seeded} linhas; "
-        f"Cotações salvas: {n_base_assets} ativos históricos, {n_base_rows} linhas; "
-        f"{n_mt5_assets} ativos MT5 atualizados hoje ({n_mt5_rows} linhas). "
+        f"Cotações salvas (Yahoo): {n_base_assets} ativos, {n_base_rows} linhas; "
+        f"Cotações D1 MT5: {n_mt5_assets} ativos, {n_mt5_rows} linhas. "
         f"Total inserido: {total_rows} linhas."
     )
     _progress_set(request.user.id, ticker="", index=n_base_assets, total=base_assets.count(), status="done", rows=total_rows)
@@ -217,10 +215,39 @@ def update_live_quotes_view(request: HttpRequest):
     """
     from longshort.services.quotes import update_live_quotes
 
-    assets = Asset.objects.filter(is_active=True).order_by("id")
+    assets = Asset.objects.filter(is_active=True, use_mt5=True).order_by("id")
     n_updated, n_total = update_live_quotes(assets)
 
     messages.success(request, f"Cotações ao vivo atualizadas: {n_updated}/{n_total} ativos.")
+    return redirect("cotacoes:home")
+
+
+@login_required
+@require_POST
+def save_today_quotes_view(request: HttpRequest):
+    """
+    Atualiza cotações de hoje (data=hoje) em QuoteDaily usando QuoteLive (MT5).
+    Sobrescreve/atualiza a linha do dia como provisória.
+    """
+    assets_updated, rows_created = persist_today_provisional_from_live_quotes()
+    messages.success(
+        request,
+        f"Cotações de hoje atualizadas: {assets_updated} ativos, {rows_created} linhas."
+    )
+    return redirect("cotacoes:home")
+
+
+@login_required
+@require_POST
+def download_history_view(request: HttpRequest):
+    """
+    Baixa/atualiza histórico faltante via Yahoo/MT5 (backfill).
+    """
+    assets_seeded, rows_seeded = ensure_min_history_for_all_assets()
+    messages.success(
+        request,
+        f"Histórico atualizado: {assets_seeded} ativos afetados, {rows_seeded} linhas inseridas."
+    )
     return redirect("cotacoes:home")
 
 
@@ -252,18 +279,6 @@ def faltantes_scan(request):
 
     request.session["faltantes_results"] = results
     return redirect("cotacoes:faltantes_home")
-
-
-from django.shortcuts import render, redirect, get_object_or_404
-from django.views.decorators.http import require_http_methods
-from django.contrib import messages
-from acoes.models import Asset
-from longshort.services.quotes import (
-    find_missing_dates_for_asset,
-    try_fetch_single_date,
-)
-
-
 
 @require_http_methods(["GET"])
 def faltantes_detail(request, ticker: str):

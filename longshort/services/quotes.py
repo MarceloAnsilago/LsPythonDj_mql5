@@ -2,13 +2,10 @@
 from __future__ import annotations
 
 """
-Plano de refatoração (MT5 como única fonte):
-- Removemos completamente yfinance/Yahoo; todas as cotações vêm do MT5.
-- Para histórico diário, usamos MT5QuoteProvider.get_history e gravamos em QuoteDaily.
-- Para preço "ao vivo", usamos MT5QuoteProvider.get_latest_price e gravamos em QuoteLive.
-- Flags antigas USE_YAHOO_HISTORY foram eliminadas; USE_MT5_LIVE passa a significar
-  apenas se devemos tentar buscar preço ao vivo ou não (padrão: True).
-- Fallbacks antigos (Stooq) e funções de Yahoo foram removidos.
+Fluxo híbrido MT5 + Yahoo:
+- MT5 é fonte principal para intraday/live e histórico D1 quando disponível.
+- Yahoo (yfinance) fica apenas como fallback para histórico faltante/ativos novos.
+- Intraday não persiste em QuoteDaily; somente candles D1 fechados (data < hoje).
 """
 
 from datetime import date, datetime, timedelta
@@ -51,15 +48,169 @@ def _safe_float(value: object) -> float | None:
 
 def _ticker_for_yahoo(asset: Asset) -> str:
     """
-    Retorna símbolo para Yahoo (usa ticker_yf se existir; senão adiciona .SA).
+    Retorna simbolo para Yahoo usando normalizacao do modelo (mapeamentos antes do .SA).
     """
     raw = getattr(asset, "ticker_yf", "") or getattr(asset, "ticker", "")
     sym = (raw or "").strip().upper()
+    if hasattr(asset, "_normalize_ticker_yf"):
+        # Respeita o mapeamento/override do modelo (já aplica .SA quando necessário)
+        sym = (asset._normalize_ticker_yf(sym) or "").strip().upper()
+        return sym
     if not sym:
         return ""
-    if "." not in sym:
-        sym = f"{sym}.SA"
+    # Fallback genérico: se não houver sufixo e houver dígito (B3), força .SA
+    if any(ch in sym for ch in ".-="):
+        return sym
+    if any(ch.isdigit() for ch in sym):
+        return f"{sym}.SA"
     return sym
+
+
+
+
+
+def _today_local() -> date:
+    try:
+        return timezone.localdate()
+    except Exception:
+        return date.today()
+
+
+def _coerce_dt_value(dt_value) -> date | None:
+    if dt_value is None:
+        return None
+    if isinstance(dt_value, datetime):
+        return dt_value.date()
+    if isinstance(dt_value, date):
+        return dt_value
+    if hasattr(dt_value, "date"):
+        try:
+            return dt_value.date()
+        except Exception:
+            return None
+    try:
+        return date.fromisoformat(str(dt_value)[:10])
+    except Exception:
+        return None
+
+
+def _insert_dailyprice_series(ticker: str, series, *, today: date | None = None) -> int:
+    """
+    Insere s�rie (date -> close) em cotacoes.QuoteDaily, ignorando datas de hoje ou futuras.
+    """
+    today = today or _today_local()
+    added = 0
+    if series is None or not hasattr(series, "items"):
+        return added
+    asset = Asset.objects.filter(ticker=ticker).first()
+    if asset is None:
+        return added
+    for dt, px in series.items():
+        if px is None:
+            continue
+        the_date = _coerce_dt_value(dt)
+        if the_date is None or the_date >= today:
+            continue
+        try:
+            QuoteDaily.objects.update_or_create(
+                asset=asset,
+                date=the_date,
+                defaults={"close": float(px), "is_provisional": False},
+            )
+            added += 1
+        except Exception:
+            continue
+    return added
+
+
+def _insert_quotedaily_series(asset: Asset, series, *, today: date | None = None) -> int:
+    """
+    Insere s?rie (date -> close) em cotacoes.QuoteDaily, ignorando datas de hoje ou futuras.
+    """
+    today = today or _today_local()
+    added = 0
+    if asset is None or series is None or not hasattr(series, "items"):
+        return added
+    for dt, px in series.items():
+        if px is None:
+            continue
+        the_date = _coerce_dt_value(dt)
+        if the_date is None or the_date >= today:
+            continue
+        try:
+            obj, created = QuoteDaily.objects.update_or_create(
+                asset=asset,
+                date=the_date,
+                defaults={"close": float(px), "is_provisional": False},
+            )
+            if created:
+                added += 1
+        except Exception:
+            continue
+    return added
+
+
+def ensure_daily_history(asset: Asset, start=None, end=None, lookback_days: int = 200) -> int:
+    """
+    Garante histórico D1 em QuoteDaily via Yahoo.
+    - Baixa apenas datas < hoje
+    - Limita o backfill a 'lookback_days' para trás
+    - Recomeça do último dia salvo + 1
+    """
+    if asset is None:
+        return 0
+    today = _today_local()
+    end_dt = today - timedelta(days=1)
+
+    last_dt = QuoteDaily.objects.filter(asset=asset, date__lt=today).aggregate(Max("date"))["date__max"]
+    start_dt = _coerce_dt_value(start)
+    if last_dt:
+        start_dt = last_dt + timedelta(days=1)
+    elif start_dt is None:
+        start_dt = end_dt - timedelta(days=lookback_days - 1)
+    # nunca baixa mais que lookback_days para trás
+    min_start = end_dt - timedelta(days=lookback_days - 1)
+    if start_dt is None or start_dt < min_start:
+        start_dt = min_start
+    if start_dt > end_dt:
+        return 0
+
+    ticker_yf = _ticker_for_yahoo(asset)
+    if not ticker_yf:
+        try:
+            MissingQuoteLog.objects.create(
+                asset=asset,
+                reason="yahoo_ticker_missing",
+                detail="Ticker Yahoo ausente/delistado (ensure_daily_history)",
+            )
+        except Exception:
+            pass
+        return 0
+
+    try:
+        series = YahooQuoteProvider().get_history(ticker=ticker_yf, start=start_dt, end=end_dt)
+    except Exception as exc:
+        series = None
+        try:
+            MissingQuoteLog.objects.create(
+                asset=asset,
+                reason="yahoo_history_error",
+                detail=f"Erro ao obter historico Yahoo: {exc}",
+            )
+        except Exception:
+            pass
+    if series is None or getattr(series, "empty", True):
+        try:
+            MissingQuoteLog.objects.create(
+                asset=asset,
+                reason="yahoo_history_empty",
+                detail="Nenhum dado retornado pelo Yahoo (ensure_daily_history)",
+            )
+        except Exception:
+            pass
+        return 0
+
+    return _insert_quotedaily_series(asset, series, today=today)
 
 
 def _update_daily_quote_close_if_changed(asset, quote_date, new_close) -> bool:
@@ -83,113 +234,81 @@ def _update_daily_quote_close_if_changed(asset, quote_date, new_close) -> bool:
 
 def ensure_today_placeholder(asset) -> None:
     """
-    Se hoje for dia útil e ainda não existir QuoteDaily para hoje,
-    cria uma linha provisória copiando o último fechamento conhecido.
+    Placeholder desativado: intraday não é persistido em QuoteDaily.
+    Mantido apenas por compatibilidade.
     """
-    today = timezone.localdate()
-    if today not in _business_days(today, today):
-        return
-
-    qs = QuoteDaily.objects.filter(asset=asset)
-    if qs.filter(date=today).exists():
-        return
-
-    last = qs.order_by("-date").first()
-    if not last:
-        return
-
-    with transaction.atomic():
-        QuoteDaily.objects.get_or_create(
-            asset=asset,
-            date=today,
-            defaults={"close": last.close, "is_provisional": True},
-        )
+    return None
 
 
 def ensure_min_history_for_asset(asset: Asset, min_bars: int = MIN_HISTORY_BARS) -> int:
     """
-    Garante que o ativo tenha pelo menos `min_bars` barras diárias em QuoteDaily.
-    Tenta MT5 primeiro; se vier vazio ou insuficiente, cai para Yahoo para completar.
-    Retorna o número de linhas inseridas.
+    Garante historico minimo fechado (data < hoje) para o ativo.
+    - use_mt5=True: tenta MT5; se faltar, usa Yahoo como fallback.
+    - use_mt5=False: usa somente Yahoo em QuoteDaily.
+    Retorna o numero de linhas inseridas.
     """
     cache_key = f"min_history_seed_asset_{getattr(asset, 'id', 'none')}"
     if cache.get(cache_key):
         return 0
+    if asset is None:
+        return 0
 
-    existing = QuoteDaily.objects.filter(asset=asset).count()
+    ticker = (getattr(asset, "ticker", "") or "").strip().upper()
+    today = _today_local()
+    use_mt5 = bool(getattr(asset, "use_mt5", False))
+
+    existing = QuoteDaily.objects.filter(asset=asset, date__lt=today).count()
     if existing >= min_bars:
         return 0
 
-    today = timezone.localdate()
     lookback_days = max(400, min_bars * 2)
     start_dt = today - timedelta(days=lookback_days)
-    end_dt = today + timedelta(days=1)
-
-    def _insert_series(series, reason_tag: str) -> int:
-        added = 0
-        if series is None or not hasattr(series, "items") or getattr(series, "empty", False):
-            return 0
-        for dt, px in series.items():
-            if px is None:
-                continue
-            try:
-                the_date = getattr(dt, "date", lambda: dt)()
-                # não sobrescreve o dia atual se já existe linha (MT5 cuida do dia)
-                if the_date == today and QuoteDaily.objects.filter(asset=asset, date=today).exists():
-                    continue
-                obj, created = QuoteDaily.objects.get_or_create(
-                    asset=asset,
-                    date=the_date,
-                    defaults={"close": float(px), "is_provisional": False},
-                )
-                if created:
-                    added += 1
-            except Exception:
-                continue
-        if added > 0 and reason_tag:
-            try:
-                MissingQuoteLog.objects.create(
-                    asset=asset,
-                    reason=reason_tag,
-                    detail=f"Backfill inserido: {added} linhas",
-                )
-            except Exception:
-                pass
-        return added
+    end_dt = today - timedelta(days=1)
 
     inserted = 0
 
-    # 1) MT5 primeiro
-    try:
-        mt5_series = MT5QuoteProvider().get_history(
-            ticker=getattr(asset, "ticker", "").strip().upper(),
-            start=start_dt,
-            end=end_dt,
-            timeframe="D",
-        )
-    except Exception as exc:
-        mt5_series = None
+    if use_mt5 and ticker:
+        try:
+            mt5_series = MT5QuoteProvider().get_history(
+                ticker=ticker,
+                start=start_dt,
+                end=end_dt,
+                timeframe="D",
+            )
+        except Exception as exc:
+            mt5_series = None
+            try:
+                MissingQuoteLog.objects.create(
+                    asset=asset,
+                    reason="mt5_history_error",
+                    detail=f"Erro ao obter historico MT5: {exc}",
+                )
+            except Exception:
+                pass
+        inserted += _insert_quotedaily_series(asset, mt5_series, today=today)
+        current_daily = QuoteDaily.objects.filter(asset=asset, date__lt=today).count()
+        if current_daily >= min_bars:
+            cache.set(cache_key, True, timeout=3600)
+            return inserted
+
+    yahoo_ticker = _ticker_for_yahoo(asset)
+    if not yahoo_ticker:
         try:
             MissingQuoteLog.objects.create(
                 asset=asset,
-                reason="mt5_history_error",
-                detail=f"Erro ao obter historico MT5: {exc}",
+                reason="yahoo_fallback_skipped",
+                detail="Ticker Yahoo ausente/delistado (mapeamento)",
             )
         except Exception:
             pass
-    inserted += _insert_series(mt5_series, reason_tag="")
-
-    total_after_mt5 = QuoteDaily.objects.filter(asset=asset).count()
-    if total_after_mt5 >= min_bars:
+        cache.set(cache_key, True, timeout=3600)
         return inserted
 
-    # 2) Fallback Yahoo para completar
-    yahoo_ticker = _ticker_for_yahoo(asset)
     try:
         yahoo_series = YahooQuoteProvider().get_history(
             ticker=yahoo_ticker,
             start=start_dt,
-            end=today,  # evita sobrescrever o dia atual
+            end=end_dt,
         )
     except Exception as exc:
         yahoo_series = None
@@ -201,7 +320,6 @@ def ensure_min_history_for_asset(asset: Asset, min_bars: int = MIN_HISTORY_BARS)
             )
         except Exception:
             pass
-
     if yahoo_series is None or getattr(yahoo_series, "empty", True):
         try:
             MissingQuoteLog.objects.create(
@@ -211,13 +329,21 @@ def ensure_min_history_for_asset(asset: Asset, min_bars: int = MIN_HISTORY_BARS)
             )
         except Exception:
             pass
-        cache.set(cache_key, True, timeout=3600)  # evita repetir imediatamente
+        cache.set(cache_key, True, timeout=3600)
         return inserted
 
-    inserted += _insert_series(yahoo_series, reason_tag="yahoo_fallback")
-    cache.set(cache_key, True, timeout=3600)  # evita repetição excessiva
+    inserted += _insert_quotedaily_series(asset, yahoo_series, today=today)
+    if inserted > 0 and use_mt5:
+        try:
+            MissingQuoteLog.objects.create(
+                asset=asset,
+                reason="yahoo_fallback",
+                detail=f"Backfill inserido via Yahoo: {inserted} linhas",
+            )
+        except Exception:
+            pass
+    cache.set(cache_key, True, timeout=3600)
     return inserted
-
 
 def ensure_min_history_for_all_assets(min_bars: int = MIN_HISTORY_BARS) -> tuple[int, int]:
     """
@@ -239,7 +365,7 @@ def ensure_min_history_for_all_assets(min_bars: int = MIN_HISTORY_BARS) -> tuple
 
 
 # ============================================================
-# Atualização diária (MT5 como fonte única)
+# Atualização diária (D1 fechado)
 # ============================================================
 def bulk_update_quotes(
     assets: Iterable,
@@ -249,41 +375,33 @@ def bulk_update_quotes(
     use_stooq: bool = False,  # mantido na assinatura para compat, ignorado
 ) -> tuple[int, int]:
     """
-    Atualiza cotações por ATIVO usando MT5QuoteProvider como fonte de histórico.
+    Atualiza cotacoes diarias fechadas.
+    - use_mt5=True: MT5 em QuoteDaily; fallback Yahoo tambem grava em QuoteDaily.
+    - use_mt5=False: Yahoo (yfinance) em QuoteDaily.
+    Apenas datas < hoje sao persistidas.
     Retorna: (n_ativos_com_insercao, n_linhas_inseridas)
     """
     provider = MT5QuoteProvider()
+    yahoo = YahooQuoteProvider()
     assets = list(assets)
     total_assets = len(assets)
-    today = timezone.localdate()
+    today = _today_local()
     if progress_cb:
         progress_cb("start", 0, total_assets, "starting", 0)
 
-    bulk_objs: list[QuoteDaily] = []
     total_rows = 0
     assets_with_inserts = 0
 
-    def _flush_bulk():
-        if not bulk_objs:
-            return
-        QuoteDaily.objects.bulk_create(
-            bulk_objs,
-            ignore_conflicts=True,
-            batch_size=BULK_BATCH_SIZE,
-        )
-        bulk_objs.clear()
-
-    # Converte período para dias aproximados (2y -> 730, 6mo -> 180, etc.)
     def _period_to_days(label: str) -> int:
-        text = (label or "").lower()
-        if text.endswith("y"):
+        text_label = (label or "").lower()
+        if text_label.endswith("y"):
             try:
-                return int(float(text[:-1]) * 365)
+                return int(float(text_label[:-1]) * 365)
             except Exception:
                 return 730
-        if text.endswith("mo"):
+        if text_label.endswith("mo"):
             try:
-                return int(float(text[:-2]) * 30)
+                return int(float(text_label[:-2]) * 30)
             except Exception:
                 return 180
         return 730
@@ -291,40 +409,96 @@ def bulk_update_quotes(
     lookback_days = _period_to_days(period)
 
     for idx, asset in enumerate(assets, start=1):
-        ticker = getattr(asset, "ticker", "").strip().upper()
+        ticker = (getattr(asset, "ticker", "") or "").strip().upper()
         if not ticker:
             if progress_cb:
                 progress_cb("", idx, total_assets, "skip_invalid", 0)
             continue
 
+        use_mt5 = bool(getattr(asset, "use_mt5", False))
         if progress_cb:
             progress_cb(ticker, idx, total_assets, "processing", 0)
 
-        # garante placeholder provisório para hoje (se negociável e ainda não existir)
-        ensure_today_placeholder(asset)
+        last_dt = QuoteDaily.objects.filter(asset=asset, date__lt=today).aggregate(Max("date"))["date__max"]
 
-        last_dt = QuoteDaily.objects.filter(asset=asset).aggregate(Max("date"))["date__max"]
         start_dt = (last_dt - timedelta(days=INCREMENTAL_LOOKBACK_DAYS)) if last_dt else (today - timedelta(days=lookback_days))
-        end_dt = today + timedelta(days=1)
 
         inserted_for_asset = 0
 
-        try:
-            series = provider.get_history(ticker=ticker, start=start_dt, end=end_dt, timeframe="D")
-        except Exception as exc:
-            print(f"[mt5] erro ao obter historico {ticker}: {exc}")
-            series = None
-
-        if series is not None and isinstance(series, pd.Series) and not series.empty:
-            series = series.dropna()
-            if last_dt:
-                series = series[series.index > last_dt]
-            for dt, px in series.items():
+        if use_mt5:
+            try:
+                series = provider.get_history(ticker=ticker, start=start_dt, end=today, timeframe="D")
+            except Exception as exc:
+                series = None
                 try:
-                    bulk_objs.append(QuoteDaily(asset=asset, date=dt, close=float(px)))
-                    inserted_for_asset += 1
-                    if len(bulk_objs) >= BULK_BATCH_SIZE:
-                        _flush_bulk()
+                    MissingQuoteLog.objects.create(
+                        asset=asset,
+                        reason="mt5_history_error",
+                        detail=f"Erro ao obter historico MT5: {exc}",
+                    )
+                except Exception:
+                    pass
+
+            if series is not None and hasattr(series, "items"):
+                try:
+                    series = series.dropna()
+                except Exception:
+                    pass
+                for dt_value, px in series.items():
+                    the_date = _coerce_dt_value(dt_value)
+                    if the_date is None or the_date >= today:
+                        continue
+                    if last_dt and the_date <= last_dt:
+                        continue
+                    try:
+                        QuoteDaily.objects.update_or_create(
+                            asset=asset,
+                            date=the_date,
+                            defaults={"close": float(px), "is_provisional": False},
+                        )
+                        inserted_for_asset += 1
+                    except Exception:
+                        continue
+
+            if inserted_for_asset == 0:
+                try:
+                    MissingQuoteLog.objects.create(
+                        asset=asset,
+                        reason="mt5_no_data",
+                        detail=f"Nenhum dado retornado pelo MT5 para {ticker}",
+                    )
+                except Exception:
+                    pass
+                yahoo_ticker = _ticker_for_yahoo(asset)
+                if yahoo_ticker:
+                    try:
+                        y_series = yahoo.get_history(ticker=yahoo_ticker, start=start_dt, end=today)
+                    except Exception:
+                        y_series = None
+                    inserted_for_asset += _insert_quotedaily_series(asset, y_series, today=today)
+        else:
+            yahoo_ticker = _ticker_for_yahoo(asset)
+            if yahoo_ticker:
+                try:
+                    y_series = yahoo.get_history(ticker=yahoo_ticker, start=start_dt, end=today)
+                except Exception as exc:
+                    y_series = None
+                    try:
+                        MissingQuoteLog.objects.create(
+                            asset=asset,
+                            reason="yahoo_error",
+                            detail=f"Erro ao obter historico Yahoo: {exc}",
+                        )
+                    except Exception:
+                        pass
+                inserted_for_asset += _insert_quotedaily_series(asset, y_series, today=today)
+            else:
+                try:
+                    MissingQuoteLog.objects.create(
+                        asset=asset,
+                        reason="yahoo_ticker_missing",
+                        detail="Ticker Yahoo ausente/delistado (mapeamento)",
+                    )
                 except Exception:
                     pass
 
@@ -334,25 +508,48 @@ def bulk_update_quotes(
             if progress_cb:
                 progress_cb(ticker, idx, total_assets, "ok", inserted_for_asset)
         else:
-            # nenhuma fonte trouxe dado algum -> loga
-            try:
-                MissingQuoteLog.objects.create(
-                    asset=asset,
-                    reason="no_data",
-                    detail=f"Nenhum dado retornado pelo MT5 para {ticker}",
-                )
-            except Exception:
-                pass
             if progress_cb:
                 progress_cb(ticker, idx, total_assets, "no_data", 0)
-
-    _flush_bulk()
 
     if progress_cb:
         progress_cb("done", total_assets, total_assets, "done", total_rows)
 
     return assets_with_inserts, total_rows
 
+# ============================================================
+# Provisório do dia (usa QuoteLive para gravar QuoteDaily hoje)
+# ============================================================
+def persist_today_provisional_from_live_quotes(assets=None) -> tuple[int, int]:
+    """
+    Gera/atualiza QuoteDaily para a data de hoje usando QuoteLive (apenas MT5).
+    - Marca como is_provisional=True
+    - Sempre sobrescreve/atualiza a linha do dia
+    Retorna (ativos_atualizados, linhas_atualizadas).
+    """
+    today = _today_local()
+    qs = assets or Asset.objects.filter(is_active=True, use_mt5=True)
+    assets_updated = 0
+    rows_updated = 0
+
+    for asset in qs:
+        live = QuoteLive.objects.filter(asset=asset).order_by("-as_of").first()
+        if live is None:
+            continue
+        price = getattr(live, "price", None)
+        if price is None:
+            price = getattr(live, "last", None)
+        if price is None:
+            continue
+
+        obj, created = QuoteDaily.objects.update_or_create(
+            asset=asset,
+            date=today,
+            defaults={"close": float(price), "is_provisional": True},
+        )
+        rows_updated += 1 if created else 1
+        assets_updated += 1
+
+    return assets_updated, rows_updated
 
 # ============================================================
 # Preço em "tempo real" (via MT5)
@@ -410,16 +607,10 @@ def apply_live_quote(
     return px
 
 
-def persist_today_from_live_quotes(assets=None) -> tuple[int, int]:
+def persist_today_from_live_quotes(assets=None, target_date: date | None = None) -> tuple[int, int]:
     """
-    Lê as cotações em QuoteLive e grava/atualiza QuoteDaily para a data de hoje.
-
-    - Se 'assets' for None, usa Asset ativos.
-    - Para cada asset com QuoteLive:
-        * date = timezone.localdate()
-        * close = live.price (ou live.last como fallback)
-        * cria/atualiza QuoteDaily(asset, date, close, is_provisional=False)
-    - Retorna (n_ativos_atualizados, n_linhas_afetadas).
+    Converte QuoteLive em QuoteDaily apenas para datas já fechadas.
+    Intraday (data >= hoje) é ignorado.
     """
     if assets is None:
         try:
@@ -427,7 +618,11 @@ def persist_today_from_live_quotes(assets=None) -> tuple[int, int]:
         except Exception:
             assets = Asset.objects.all()
 
-    today = timezone.localdate()
+    today = _today_local()
+    target = target_date or today
+    if target >= today:
+        return 0, 0
+
     assets_count = 0
     rows_count = 0
 
@@ -442,7 +637,7 @@ def persist_today_from_live_quotes(assets=None) -> tuple[int, int]:
 
         QuoteDaily.objects.update_or_create(
             asset=asset,
-            date=today,
+            date=target,
             defaults={"close": close, "is_provisional": False},
         )
         assets_count += 1
@@ -456,10 +651,11 @@ def fetch_latest_price(ticker: str) -> Optional[float]:
     Retorna o último preço disponível do MT5 (ticker B3).
     """
     provider = MT5QuoteProvider()
+    ticker_norm = (ticker or "").strip().upper()
     try:
-        return provider.get_latest_price(ticker)
+        return provider.get_latest_price(ticker_norm)
     except Exception as exc:
-        print(f"[mt5] erro latest price {ticker}: {exc}")
+        print(f"[mt5] erro latest price {ticker_norm}: {exc}")
         return None
 
 
@@ -478,6 +674,10 @@ def update_live_quotes(assets: Iterable, progress_cb: ProgressCB = None) -> tupl
     updated = 0
 
     for idx, asset in enumerate(assets, start=1):
+        if not getattr(asset, "use_mt5", False):
+            if progress_cb:
+                progress_cb("", idx, total, "skip_non_mt5", 0)
+            continue
         ticker = getattr(asset, "ticker", "").strip().upper()
         if not ticker:
             continue
@@ -581,7 +781,7 @@ def scan_all_assets_and_fix(
     """
     Varre ativos, tenta corrigir buracos e retorna lista serializavel:
     [{ticker, missing_before, fixed, remaining:[YYYY-MM-DD,...]}]
-    - Ignora ativos com use_mt5=True (tratados via MT5/DailyPrice).
+    - Ignora ativos com use_mt5=True (tratados via MT5/QuoteDaily).
     """
     try:
         qs = Asset.objects.filter(is_active=True)

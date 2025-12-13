@@ -15,7 +15,6 @@ from statsmodels.tsa.stattools import adfuller
 # Modelos
 from acoes.models import Asset
 from cotacoes.models import QuoteDaily
-from mt5api.models import DailyPrice
 from longshort.services.price_provider import get_daily_prices
 
 # Util: half-life para OU discreto via regressão Δs_t = α + ρ s_{t-1} + ε
@@ -56,13 +55,11 @@ def _last_corr(returns_a: pd.Series, returns_b: pd.Series, lookback: int) -> flo
 
 
 def _latest_daily_date() -> date:
-    """Última data conhecida considerando QuoteDaily e DailyPrice."""
+    """Última data conhecida considerando apenas QuoteDaily."""
     qd_max = QuoteDaily.objects.aggregate(Max("date"))["date__max"]
-    mt5_max = DailyPrice.objects.aggregate(Max("date"))["date__max"]
-    candidates = [d for d in [qd_max, mt5_max] if d is not None]
-    if not candidates:
+    if qd_max is None:
         return timezone.localdate()
-    return max(candidates)
+    return qd_max
 
 
 def _df_from_provider(asset: Asset, lookback: int, window_end: date | None = None, column_name: str = "close") -> pd.DataFrame:

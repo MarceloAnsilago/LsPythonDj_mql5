@@ -130,6 +130,8 @@ def _build_home_operations_payload(request):
         nonlocal manual_refresh_required
         if not asset:
             return current_price, current_updated
+        if not getattr(asset, "use_mt5", False):
+            return current_price, current_updated
         if not force and current_price is not None:
             return current_price, current_updated
         ticker_norm = _normalize_ticker(getattr(asset, "ticker", None))
@@ -997,7 +999,7 @@ def _build_current_asset_price(asset: Asset | None) -> tuple[Decimal | None, obj
             else:
                 source = getattr(live_quote, "source", None) or "cache"
         updated = getattr(live_quote, "as_of", None) or getattr(live_quote, "updated_at", None)
-    if price is None and use_mt5_live:
+    if price is None and use_mt5_live and getattr(asset, "use_mt5", False):
         ticker = (getattr(asset, "ticker", "") or "").strip().upper()
         if ticker:
             live_price = None
@@ -1157,7 +1159,7 @@ def operacoes(request):
                 price_source = getattr(live_quote, "source", None) or "cache"
 
         live_px_error = False
-        if ticker_norm and use_mt5_live:
+        if ticker_norm and use_mt5_live and getattr(asset_obj, "use_mt5", False):
             try:
                 live_px = fetch_latest_price(ticker_norm)
             except Exception:

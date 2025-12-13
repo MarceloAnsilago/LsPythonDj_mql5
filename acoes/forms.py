@@ -11,8 +11,4 @@ class AssetForm(forms.ModelForm):
         return (self.cleaned_data.get("ticker") or "").upper().strip()
 
     def clean_ticker_yf(self):
-        ticker = (self.cleaned_data.get("ticker") or "").upper().strip()
-        yf = (self.cleaned_data.get("ticker_yf") or ticker).upper().strip()
-        if yf and "." not in yf:
-            yf += ".SA"               # autopreenche .SA
-        return yf
+        return (self.cleaned_data.get("ticker_yf") or "").upper().strip()

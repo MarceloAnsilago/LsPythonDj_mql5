@@ -10,12 +10,23 @@
       </div>
 
       <div class="d-flex gap-2">
-        <!-- BOTÃO COM SPINNER -->
-        <a id="btnUpdate" class="btn btn-outline-primary" href="{% url 'cotacoes:update' %}">
-          <span class="spinner-border spinner-border-sm me-2 d-none" id="spUpdate" role="status" aria-hidden="true"></span>
-          <i class="bi bi-arrow-clockwise" id="icoUpdate"></i>
-          <span id="txtUpdate">Salvar cotações do dia</span>
-        </a>
+        <!-- Atualizar cotações do dia (MT5 -> QuoteDaily provisório) -->
+        <form id="formUpdateToday" method="post" action="{% url 'cotacoes:save_today' %}">
+          {% csrf_token %}
+          <button type="submit" id="btnUpdateToday" class="btn btn-outline-primary">
+            <span class="spinner-border spinner-border-sm me-2 d-none" id="spUpdateToday" role="status" aria-hidden="true"></span>
+            <i class="bi bi-arrow-clockwise" id="icoUpdateToday"></i>
+            <span id="txtUpdateToday">Atualizar cotações do dia</span>
+          </button>
+        </form>
+
+        <!-- Baixar histórico faltante (Yahoo/MT5) -->
+        <form method="post" action="{% url 'cotacoes:download_history' %}">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-outline-secondary">
+            <i class="bi bi-cloud-download"></i> Baixar histórico
+          </button>
+        </form>
 
         <a class="btn btn-outline-info" href="{% url 'cotacoes:pivot' %}">
           <i class="bi bi-layout-three-columns"></i> Tabela dinâmica (tela cheia)
@@ -32,9 +43,10 @@
           <strong>Tabela de Cotações (Pivot)</strong>
         </div>
         <div class="card-body">
-          <form method="get" class="row g-2 align-items-center mb-3">
+          <form id="filterForm" method="get" class="row g-2 align-items-center mb-3">
             <div class="col-sm-8 col-md-9">
               <input type="text"
+                     id="filterTickers"
                      name="tickers"
                      class="form-control form-control-sm"
                      placeholder="ABEV3, ALOS3"
@@ -93,7 +105,12 @@
               <li class="list-group-item">
                 <div class="d-flex justify-content-between align-items-start">
                   <div>
-                    <span class="badge text-bg-secondary">{{ log.asset.ticker }}</span>
+                    <button type="button"
+                            class="badge text-bg-secondary log-ticker-btn"
+                            data-ticker="{{ log.asset.ticker }}"
+                            style="border: none;">
+                      {{ log.asset.ticker }}
+                    </button>
                     <small class="text-muted">{{ log.created_at|date:"d/m/Y H:i" }}</small><br>
                     <span class="small d-block mt-1">
                       {{ log.reason }} — {{ log.detail|truncatechars:80 }}
@@ -140,21 +157,41 @@
 <!-- Script do spinner -->
 <script>
 document.addEventListener('DOMContentLoaded', function () {
-  const btn = document.getElementById('btnUpdate');
+  const btn = document.getElementById('btnUpdateToday');
   if (!btn) return;
 
-  const sp  = document.getElementById('spUpdate');
-  const ico = document.getElementById('icoUpdate');
-  const txt = document.getElementById('txtUpdate');
+  const sp  = document.getElementById('spUpdateToday');
+  const ico = document.getElementById('icoUpdateToday');
+  const txt = document.getElementById('txtUpdateToday');
 
   btn.addEventListener('click', function () {
     // mostra spinner e desabilita botão imediatamente
     sp.classList.remove('d-none');
     if (ico) ico.classList.add('d-none');
-    if (txt) txt.textContent = 'Salvando...';
+    if (txt) txt.textContent = 'Atualizando...';
     btn.classList.add('disabled');
     btn.setAttribute('aria-disabled', 'true');
   }, { passive: true });
+
+  // Clique no ticker do log -> joga no filtro
+  const filterInput = document.getElementById('filterTickers');
+  const filterForm = document.getElementById('filterForm');
+  document.querySelectorAll('.log-ticker-btn').forEach(function (el) {
+    el.addEventListener('click', function () {
+      if (!filterInput) return;
+      const ticker = el.getAttribute('data-ticker');
+      const current = (filterInput.value || '').trim();
+      let parts = current ? current.split(/[\s,]+/) : [];
+      parts = parts.filter(Boolean);
+      if (!parts.includes(ticker)) {
+        parts.push(ticker);
+      }
+      filterInput.value = parts.join(', ');
+      if (filterForm) {
+        filterForm.submit();
+      }
+    });
+  });
 });
 </script>
 {% endblock %}

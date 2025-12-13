@@ -73,7 +73,7 @@ def _sync_price_history(dia: date) -> dict[str, int]:
 
         defaults = {
             "close": Decimal(str(close_px)),
-            "source": "DailyPrice" if getattr(asset, "use_mt5", False) else "QuoteDaily",
+            "source": "QuoteDaily",
         }
         _, was_created = PriceHistory.objects.update_or_create(
             asset=asset,

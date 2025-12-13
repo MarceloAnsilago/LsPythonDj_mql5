@@ -1,8 +1,11 @@
 # Integracao MT5 no LongShort
 
+- MT5 é a fonte principal (live/intraday + D1 fechado). Intraday não persiste em `QuoteDaily/DailyPrice`.
+- Yahoo permanece apenas como fallback para histórico faltante/ativos novos (grava em `QuoteDaily`), sempre com data < hoje.
+
 ## Ativar MT5 para um ativo
 - Marque `use_mt5=True` no cadastro de `Asset` (admin ou formulario do app).
-- Quando marcado, o ativo **nao** e atualizado por Yahoo/Stooq nem gera `MissingQuoteLog`.
+- Quando marcado, o ativo **nao** usa Yahoo para intraday; Yahoo só é chamado para backfill se faltar histórico fechado.
 - Pivot, analises e metricas passam a ler `mt5api.DailyPrice` em vez de `cotacoes.QuoteDaily`.
 
 ## Entrada de ticks (tempo real)
@@ -17,7 +20,7 @@
   - `LiveTick` (um registro por tick recebido)
 
 ## Consolidacao diaria (OHLC)
-- Comando base: `python manage.py agg_daily_prices --date YYYY-MM-DD` (padrao = hoje).
+- Comando base: `python manage.py agg_daily_prices --date YYYY-MM-DD` (use sempre data < hoje).
 - Consolida todos os `LiveTick` do dia por ticker:
   - `open`: primeiro tick do dia (`last`)
   - `close`: ultimo tick do dia
@@ -39,14 +42,13 @@
 
 ## Historico oficial com MT5
 - Ativos `use_mt5=True`:
-  - Nao sao atualizados por Yahoo/Stooq.
-  - Nao geram `MissingQuoteLog`.
-  - Aparecem nas pivots e analises usando `DailyPrice`.
-  - `PriceHistory` (app_pares) tambem e sincronizado a partir de `DailyPrice`.
+  - D1 principal em `DailyPrice` via MT5 (ticks agregados ou HTTP).
+  - Yahoo só entra como fallback (QuoteDaily) para buracos/ativos novos.
+  - `PriceHistory` (app_pares) também é sincronizado a partir de `DailyPrice`.
 
 ## Rotina diaria recomendada
 1. Receber ticks via `push-live-quote` ao longo do dia.
 2. Consolidar e validar:
-   - `python manage.py mt5sync_daily --date YYYY-MM-DD` (padrao: hoje)
+   - `python manage.py mt5sync_daily --date YYYY-MM-DD` (sempre data < hoje)
    - Esse comando roda `agg_daily_prices`, verifica se todos `use_mt5=True` tem `DailyPrice` e alerta se houver poucos/nenhum tick.
 3. Executar fluxos de pares/estrategia normalmente; as metricas usarao `DailyPrice` para ativos MT5.

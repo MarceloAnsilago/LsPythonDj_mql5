@@ -6,7 +6,9 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db.models import Max, Min
 from django.utils import timezone
 
-from mt5api.models import DailyPrice, LiveTick
+from acoes.models import Asset
+from cotacoes.models import QuoteDaily
+from mt5api.models import LiveTick
 
 
 class Command(BaseCommand):
@@ -30,6 +32,9 @@ class Command(BaseCommand):
         else:
             target_date = timezone.localdate()
 
+        if target_date >= timezone.localdate():
+            raise CommandError("Somente candles D1 fechados (date < hoje) podem ser consolidados.")
+
         tz = timezone.get_default_timezone()
         start_dt = timezone.make_aware(datetime.combine(target_date, time.min), tz)
         end_dt = timezone.make_aware(datetime.combine(target_date, time.max), tz)
@@ -49,25 +54,21 @@ class Command(BaseCommand):
         updated = 0
 
         for ticker in tickers:
+            asset = Asset.objects.filter(ticker=ticker).first()
+            if asset is None:
+                continue
             ticker_qs = ticks_qs.filter(ticker=ticker).order_by("timestamp")
             first_tick = ticker_qs.first()
             last_tick = ticker_qs.last()
             if not first_tick or not last_tick:
                 continue
 
-            agg = ticker_qs.aggregate(
-                high=Max("last"),
-                low=Min("last"),
-            )
-
-            _, was_created = DailyPrice.objects.update_or_create(
-                ticker=ticker,
+            _, was_created = QuoteDaily.objects.update_or_create(
+                asset=asset,
                 date=target_date,
                 defaults={
-                    "open": first_tick.last,
                     "close": last_tick.last,
-                    "high": agg["high"],
-                    "low": agg["low"],
+                    "is_provisional": False,
                 },
             )
             if was_created:
@@ -76,7 +77,7 @@ class Command(BaseCommand):
                 updated += 1
 
             self.stdout.write(
-                f"{ticker} {target_date}: open={first_tick.last} high={agg['high']} low={agg['low']} close={last_tick.last}"
+                f"{ticker} {target_date}: open={first_tick.last} close={last_tick.last}"
             )
 
         self.stdout.write(

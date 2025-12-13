@@ -7,7 +7,8 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from acoes.models import Asset
-from mt5api.models import DailyPrice, LiveTick
+from cotacoes.models import QuoteDaily
+from mt5api.models import LiveTick
 
 
 class Command(BaseCommand):
@@ -31,6 +32,9 @@ class Command(BaseCommand):
         else:
             target_date = timezone.localdate()
 
+        if target_date >= timezone.localdate():
+            raise CommandError("Somente candles D1 fechados (date < hoje) podem ser consolidados.")
+
         self.stdout.write(f"[mt5sync_daily] Consolidando ticks para {target_date}...")
         call_command("agg_daily_prices", date=target_date.isoformat())
 
@@ -52,9 +56,9 @@ class Command(BaseCommand):
                 timestamp__gte=start_dt,
                 timestamp__lte=end_dt,
             ).count()
-            daily = DailyPrice.objects.filter(ticker=asset.ticker, date=target_date).first()
+            daily = QuoteDaily.objects.filter(asset=asset, date=target_date).first()
             if daily is None:
-                warnings.append(f"{asset.ticker}: sem DailyPrice para {target_date} (ticks={tick_count})")
+                warnings.append(f"{asset.ticker}: sem QuoteDaily para {target_date} (ticks={tick_count})")
                 continue
             if tick_count < 2:
                 warnings.append(f"{asset.ticker}: poucos ticks ({tick_count}) para {target_date}")
