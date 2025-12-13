@@ -55,10 +55,14 @@ def _last_corr(returns_a: pd.Series, returns_b: pd.Series, lookback: int) -> flo
 
 
 def _latest_daily_date() -> date:
-    """Última data conhecida considerando apenas QuoteDaily."""
-    qd_max = QuoteDaily.objects.aggregate(Max("date"))["date__max"]
+    """Ultima data conhecida considerando apenas QuoteDaily fechado (date < hoje, definitivo)."""
+    today = timezone.localdate()
+    qd_max = (
+        QuoteDaily.objects.filter(date__lt=today, is_provisional=False)
+        .aggregate(Max("date"))["date__max"]
+    )
     if qd_max is None:
-        return timezone.localdate()
+        return today - timedelta(days=1)
     return qd_max
 
 

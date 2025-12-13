@@ -57,11 +57,16 @@ DEBUG = _env_bool("DJANGO_DEBUG", True)
 if not DEBUG and not os.environ.get("DJANGO_SECRET_KEY"):
     raise RuntimeError("DJANGO_SECRET_KEY deve estar definido em produção (DEBUG=False).")
 
-ALLOWED_HOSTS = _env_hosts("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,.fly.dev")
+ALLOWED_HOSTS = _env_hosts(
+    "DJANGO_ALLOWED_HOSTS",
+    # Default abre localhost, loopback e bind 0.0.0.0 para dev/LAN (quando DEBUG=True)
+    "localhost,127.0.0.1,0.0.0.0,.fly.dev",
+)
 
 CSRF_TRUSTED_ORIGINS = _env_hosts(
     "DJANGO_CSRF_TRUSTED_ORIGINS",
-    "https://lspythondj.fly.dev,https://*.fly.dev",
+    # Inclui http(s) para uso local/LAN; adicione http://<ip_da_maquina> via env para MT5
+    "http://localhost,http://127.0.0.1,http://0.0.0.0,https://lspythondj.fly.dev,https://*.fly.dev",
 )
 
 

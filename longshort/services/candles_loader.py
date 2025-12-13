@@ -12,8 +12,12 @@ from longshort.services.metrics import CandleUniverse, CANDLE_LOOKBACK_PAD
 
 
 def _latest_daily_date() -> date:
-    latest = QuoteDaily.objects.aggregate(Max("date"))["date__max"]
-    return latest or date.today()
+    today = date.today()
+    latest = (
+        QuoteDaily.objects.filter(date__lt=today, is_provisional=False)
+        .aggregate(Max("date"))["date__max"]
+    )
+    return latest or (today - timedelta(days=1))
 
 
 def load_candles_for_universe(
@@ -31,13 +35,18 @@ def load_candles_for_universe(
     if not asset_ids:
         return CandleUniverse({})
 
-    if window_end is None:
+    if window_end is None or window_end >= date.today():
         window_end = _latest_daily_date()
 
     lookback_days = max(1, lookback_windows * pad_factor)
     window_start = window_end - timedelta(days=lookback_days)
 
-    qs = QuoteDaily.objects.filter(asset_id__in=asset_ids, date__gte=window_start, date__lte=window_end)
+    qs = QuoteDaily.objects.filter(
+        asset_id__in=asset_ids,
+        date__gte=window_start,
+        date__lte=window_end,
+        is_provisional=False,
+    )
     rows: list[dict] = [
         {
             "asset_id": row.asset_id,

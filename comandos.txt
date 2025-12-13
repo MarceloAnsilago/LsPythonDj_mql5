@@ -8,7 +8,7 @@ LongShortDjango
 
 
 Adm
-adminadmin
+SUA_SENHA
 
 python manage.py shell
 

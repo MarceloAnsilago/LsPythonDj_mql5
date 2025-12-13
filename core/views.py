@@ -30,6 +30,9 @@ from pairs.forms import UserMetricsConfigForm
 from pairs.models import Pair, UserMetricsConfig
 from operacoes.models import Operation, OperationMetricSnapshot
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 def _build_home_operations_payload(request):
     operations_cards: list[dict] = []
@@ -173,9 +176,27 @@ def _build_home_operations_payload(request):
                 to_attr="current_snapshots",
             ),
         )
-        .filter(user=request.user, status=Operation.STATUS_OPEN)
+        # Mostra todas as operacoes abertas independentemente do usuario, evitando esconder cards
+        # por inconsistencias de ownership em ambiente local.
+        .filter(status=Operation.STATUS_OPEN)
         .order_by("-opened_at")
     )
+    if settings.DEBUG:
+        try:
+            logger.warning(
+                "home_data operations_qs count=%s items=%s",
+                operations_qs.count(),
+                list(
+                    operations_qs.values_list(
+                        "id",
+                        "sell_asset__ticker",
+                        "buy_asset__ticker",
+                        "user__username",
+                    )
+                ),
+            )
+        except Exception:
+            pass
 
     for operation in operations_qs:
         entry_snapshot = (operation.entry_snapshots[0] if getattr(operation, "entry_snapshots", None) else None)
@@ -243,183 +264,184 @@ def _build_home_operations_payload(request):
                     except (TypeError, ValueError):
                         current_zscore = None
 
-    def _build_live_price(asset):
-        quote = getattr(asset, "live_quote", None) if asset else None
-        price = None
-        updated = None
-        if quote:
-            raw_price = quote.price if quote.price is not None else getattr(quote, "last", None)
-            if raw_price is not None:
-                try:
-                    price = Decimal(str(raw_price))
-                except (TypeError, ValueError):
-                    price = None
-            updated = getattr(quote, "as_of", None) or getattr(quote, "updated_at", None)
-        return price, updated
-
-    sell_live_price, sell_updated = _build_live_price(operation.sell_asset)
-    sell_live_price, sell_updated = _refresh_live_price(
-        operation.sell_asset, sell_live_price, sell_updated
-    )
-    buy_live_price, buy_updated = _build_live_price(operation.buy_asset)
-    buy_live_price, buy_updated = _refresh_live_price(
-        operation.buy_asset, buy_live_price, buy_updated
-    )
-
-    sell_qty_dec = Decimal(operation.sell_quantity)
-    buy_qty_dec = Decimal(operation.buy_quantity)
-    sell_pl = None
-    if sell_live_price is not None:
-        sell_pl = (operation.sell_price - sell_live_price) * sell_qty_dec
-    buy_pl = None
-    if buy_live_price is not None:
-        buy_pl = (buy_live_price - operation.buy_price) * buy_qty_dec
-
-    current_sell_total = None
-    current_buy_total = None
-    if sell_live_price is not None:
-        current_sell_total = (sell_live_price * sell_qty_dec).quantize(money_quant)
-    if buy_live_price is not None:
-        current_buy_total = (buy_live_price * buy_qty_dec).quantize(money_quant)
-
-    current_net_value = None
-    if current_sell_total is not None and current_buy_total is not None:
-        current_net_value = (current_sell_total - current_buy_total).quantize(money_quant)
-
-    pl_total = None
-    if sell_pl is not None and buy_pl is not None:
-        pl_total = (sell_pl + buy_pl).quantize(money_quant)
-
-    pnl_ready = sell_pl is not None and buy_pl is not None
-    pnl_positive = pnl_ready and pl_total is not None and pl_total > 0
-    pnl_negative = pnl_ready and pl_total is not None and pl_total < 0
-
-    latest_update = max(dt for dt in (sell_updated, buy_updated) if dt is not None) if sell_updated or buy_updated else None
-
-    z_delta_label = "--"
-    is_delta_positive = False
-    if entry_zscore is not None and current_zscore is not None:
-        try:
-            delta = float(current_zscore) - float(entry_zscore)
-            z_delta_label = f"{delta:+.2f}"
-            is_delta_positive = delta >= 0
-        except (TypeError, ValueError):
-            z_delta_label = "--"
-            is_delta_positive = False
-
-    entry_net_direction = ""
-    if operation.net_value is not None:
-        entry_net_direction = "recebe" if operation.net_value >= 0 else "paga"
-
-    entry_prices = {
-        "sell_qty_label": _fmt_int(operation.sell_quantity),
-        "buy_qty_label": _fmt_int(operation.buy_quantity),
-        "sell_price_label": _fmt_money(operation.sell_price),
-        "buy_price_label": _fmt_money(operation.buy_price),
-        "sell_total_label": _fmt_money(operation.sell_value),
-        "buy_total_label": _fmt_money(operation.buy_value),
-        "net_label": _fmt_money(operation.net_value),
-        "net_direction_label": entry_net_direction,
-    }
-
-    def _asset_info_url(asset: Asset | None) -> str:
-        # Placeholder neutro para futuras integrações (ex.: página interna).
-        return "#"
-
-    current_balance_value: Decimal | None = None
-    if pl_total is not None:
-        current_balance_value = pl_total
-    elif current_net_value is not None and operation.net_value is not None:
-        current_balance_value = (current_net_value - operation.net_value).quantize(money_quant)
-    elif current_net_value is not None:
-        current_balance_value = current_net_value
-    final_direction_label = ""
-    if current_balance_value is not None:
-        final_direction_label = "recebe" if current_balance_value >= 0 else "paga"
-
-    current_prices = {
-        "updated_label": _fmt_updated(latest_update),
-        "sell_price_label": _fmt_money(sell_live_price),
-        "buy_price_label": _fmt_money(buy_live_price),
-        "sell_total_label": _fmt_money(current_sell_total),
-        "buy_total_label": _fmt_money(current_buy_total),
-        "sell_pl_label": _fmt_money(sell_pl),
-        "buy_pl_label": _fmt_money(buy_pl),
-        "net_label": _fmt_money(current_net_value),
-        "pl_total_label": _fmt_money(pl_total),
-        "final_label": _fmt_money(current_balance_value),
-        "final_direction_label": final_direction_label,
-    }
-
-    pnl_summary = None
-    if sell_live_price is not None and buy_live_price is not None:
-        capital_allocated_float = float(operation.capital_allocated or 0.0)
-        total_trade_value = float(operation.sell_value + operation.buy_value)
-        if total_trade_value > 0:
-            short_share = float(operation.sell_value) / total_trade_value
-        else:
-            short_share = 0.5
-        capital_short = capital_allocated_float * short_share
-        capital_long = capital_allocated_float - capital_short
-        pnl_stats = _long_short_pnl(
-            entry_short=operation.sell_price,
-            exit_short=sell_live_price,
-            entry_long=operation.buy_price,
-            exit_long=buy_live_price,
-            capital_short=capital_short,
-            capital_long=capital_long,
+        def _build_live_price(asset):
+            quote = getattr(asset, "live_quote", None) if asset else None
+            price = None
+            updated = None
+            if quote:
+                raw_price = quote.price if quote.price is not None else getattr(quote, "last", None)
+                if raw_price is not None:
+                    try:
+                        price = Decimal(str(raw_price))
+                    except (TypeError, ValueError):
+                        price = None
+                updated = getattr(quote, "as_of", None) or getattr(quote, "updated_at", None)
+            return price, updated
+    
+        sell_live_price, sell_updated = _build_live_price(operation.sell_asset)
+        sell_live_price, sell_updated = _refresh_live_price(
+            operation.sell_asset, sell_live_price, sell_updated
         )
-        if pnl_stats:
-            def _format_pct(value: float | None) -> str:
-                if value is None:
-                    return "--"
-                try:
-                    return f"{value:+.2f}%"
-                except (TypeError, ValueError):
-                    return "--"
-
-            pnl_summary = {
-                "capital_total_label": _fmt_money(pnl_stats.get("capital_total")),
-                "lucro_short_label": _fmt_money(pnl_stats.get("lucro_short")),
-                "lucro_long_label": _fmt_money(pnl_stats.get("lucro_long")),
-                "lucro_total_label": _fmt_money(pnl_stats.get("lucro_total")),
-                "retorno_short_label": _format_pct(pnl_stats.get("retorno_short_%")),
-                "retorno_long_label": _format_pct(pnl_stats.get("retorno_long_%")),
-                "retorno_total_label": _format_pct(pnl_stats.get("retorno_total_%")),
-            }
-
-    operations_cards.append(
-        {
-            "operation": operation,
-            "url": reverse("core:operacao_encerrar", args=[operation.pk]),
-            "operation_date_label": _fmt_updated(operation.opened_at),
-            "operation_days_label": _format_days_open(operation.opened_at),
-            "capital_label": _fmt_money(operation.capital_allocated),
-            "entry": {
-                "zscore_label": _fmt_metric(entry_zscore),
-                "prices": entry_prices,
-            },
-            "entry_reference_label": entry_reference_label,
-            "current": {
-                "zscore_label": _fmt_metric(current_zscore),
-                "prices": current_prices,
-            },
-            "is_delta_positive": is_delta_positive,
-            "z_delta_label": z_delta_label,
-            "pnl_ready": pnl_ready,
-            "pnl_positive": pnl_positive,
-            "pnl_negative": pnl_negative,
-            "pnl_summary": pnl_summary,
-            "current_zscore": current_zscore,
-            "entry_zscore": entry_zscore,
-            "asset_urls": {
-                "sell": _asset_info_url(operation.sell_asset),
-                "buy": _asset_info_url(operation.buy_asset),
-            },
-            "current_balance_value": current_balance_value,
-            "entry_net_direction": entry_net_direction,
+        buy_live_price, buy_updated = _build_live_price(operation.buy_asset)
+        buy_live_price, buy_updated = _refresh_live_price(
+            operation.buy_asset, buy_live_price, buy_updated
+        )
+    
+        sell_qty_dec = Decimal(operation.sell_quantity)
+        buy_qty_dec = Decimal(operation.buy_quantity)
+        sell_pl = None
+        if sell_live_price is not None:
+            sell_pl = (operation.sell_price - sell_live_price) * sell_qty_dec
+        buy_pl = None
+        if buy_live_price is not None:
+            buy_pl = (buy_live_price - operation.buy_price) * buy_qty_dec
+    
+        current_sell_total = None
+        current_buy_total = None
+        if sell_live_price is not None:
+            current_sell_total = (sell_live_price * sell_qty_dec).quantize(money_quant)
+        if buy_live_price is not None:
+            current_buy_total = (buy_live_price * buy_qty_dec).quantize(money_quant)
+    
+        current_net_value = None
+        if current_sell_total is not None and current_buy_total is not None:
+            current_net_value = (current_sell_total - current_buy_total).quantize(money_quant)
+    
+        pl_total = None
+        if sell_pl is not None and buy_pl is not None:
+            pl_total = (sell_pl + buy_pl).quantize(money_quant)
+    
+        pnl_ready = sell_pl is not None and buy_pl is not None
+        pnl_positive = pnl_ready and pl_total is not None and pl_total > 0
+        pnl_negative = pnl_ready and pl_total is not None and pl_total < 0
+    
+        latest_update = max(dt for dt in (sell_updated, buy_updated) if dt is not None) if sell_updated or buy_updated else None
+    
+        z_delta_label = "--"
+        is_delta_positive = False
+        if entry_zscore is not None and current_zscore is not None:
+            try:
+                delta = float(current_zscore) - float(entry_zscore)
+                z_delta_label = f"{delta:+.2f}"
+                is_delta_positive = delta >= 0
+            except (TypeError, ValueError):
+                z_delta_label = "--"
+                is_delta_positive = False
+    
+        entry_net_direction = ""
+        if operation.net_value is not None:
+            entry_net_direction = "recebe" if operation.net_value >= 0 else "paga"
+    
+        entry_prices = {
+            "sell_qty_label": _fmt_int(operation.sell_quantity),
+            "buy_qty_label": _fmt_int(operation.buy_quantity),
+            "sell_price_label": _fmt_money(operation.sell_price),
+            "buy_price_label": _fmt_money(operation.buy_price),
+            "sell_total_label": _fmt_money(operation.sell_value),
+            "buy_total_label": _fmt_money(operation.buy_value),
+            "net_label": _fmt_money(operation.net_value),
+            "net_direction_label": entry_net_direction,
         }
-    )
+    
+        def _asset_info_url(asset: Asset | None) -> str:
+            # Placeholder neutro para futuras integrações (ex.: página interna).
+            return "#"
+    
+        current_balance_value: Decimal | None = None
+        if pl_total is not None:
+            current_balance_value = pl_total
+        elif current_net_value is not None and operation.net_value is not None:
+            current_balance_value = (current_net_value - operation.net_value).quantize(money_quant)
+        elif current_net_value is not None:
+            current_balance_value = current_net_value
+        final_direction_label = ""
+        if current_balance_value is not None:
+            final_direction_label = "recebe" if current_balance_value >= 0 else "paga"
+    
+        current_prices = {
+            "updated_label": _fmt_updated(latest_update),
+            "sell_price_label": _fmt_money(sell_live_price),
+            "buy_price_label": _fmt_money(buy_live_price),
+            "sell_total_label": _fmt_money(current_sell_total),
+            "buy_total_label": _fmt_money(current_buy_total),
+            "sell_pl_label": _fmt_money(sell_pl),
+            "buy_pl_label": _fmt_money(buy_pl),
+            "net_label": _fmt_money(current_net_value),
+            "pl_total_label": _fmt_money(pl_total),
+            "final_label": _fmt_money(current_balance_value),
+            "final_direction_label": final_direction_label,
+        }
+    
+        pnl_summary = None
+        if sell_live_price is not None and buy_live_price is not None:
+            capital_allocated_float = float(operation.capital_allocated or 0.0)
+            total_trade_value = float(operation.sell_value + operation.buy_value)
+            if total_trade_value > 0:
+                short_share = float(operation.sell_value) / total_trade_value
+            else:
+                short_share = 0.5
+            capital_short = capital_allocated_float * short_share
+            capital_long = capital_allocated_float - capital_short
+            pnl_stats = _long_short_pnl(
+                entry_short=operation.sell_price,
+                exit_short=sell_live_price,
+                entry_long=operation.buy_price,
+                exit_long=buy_live_price,
+                capital_short=capital_short,
+                capital_long=capital_long,
+            )
+            if pnl_stats:
+                def _format_pct(value: float | None) -> str:
+                    if value is None:
+                        return "--"
+                    try:
+                        return f"{value:+.2f}%"
+                    except (TypeError, ValueError):
+                        return "--"
+    
+                pnl_summary = {
+                    "capital_total_label": _fmt_money(pnl_stats.get("capital_total")),
+                    "lucro_short_label": _fmt_money(pnl_stats.get("lucro_short")),
+                    "lucro_long_label": _fmt_money(pnl_stats.get("lucro_long")),
+                    "lucro_total_label": _fmt_money(pnl_stats.get("lucro_total")),
+                    "retorno_short_label": _format_pct(pnl_stats.get("retorno_short_%")),
+                    "retorno_long_label": _format_pct(pnl_stats.get("retorno_long_%")),
+                    "retorno_total_label": _format_pct(pnl_stats.get("retorno_total_%")),
+                }
+    
+        operations_cards.append(
+            {
+                "operation": operation,
+                "url": reverse("core:operacao_encerrar", args=[operation.pk]),
+                "operation_date_label": _fmt_updated(operation.opened_at),
+                "operation_days_label": _format_days_open(operation.opened_at),
+                "capital_label": _fmt_money(operation.capital_allocated),
+                "entry": {
+                    "zscore_label": _fmt_metric(entry_zscore),
+                    "prices": entry_prices,
+                },
+                "entry_reference_label": entry_reference_label,
+                "current": {
+                    "zscore_label": _fmt_metric(current_zscore),
+                    "prices": current_prices,
+                },
+                "is_delta_positive": is_delta_positive,
+                "z_delta_label": z_delta_label,
+                "pnl_ready": pnl_ready,
+                "pnl_positive": pnl_positive,
+                "pnl_negative": pnl_negative,
+                "pnl_summary": pnl_summary,
+                "current_zscore": current_zscore,
+                "entry_zscore": entry_zscore,
+                "asset_urls": {
+                    "sell": _asset_info_url(operation.sell_asset),
+                    "buy": _asset_info_url(operation.buy_asset),
+                },
+                "current_balance_value": current_balance_value,
+                "entry_net_direction": entry_net_direction,
+            }
+        )
+    
     def _card_zscore_sort_value(card):
         value = card.get("current_zscore")
         if value is None:
