@@ -4,6 +4,7 @@ import time
 
 from dataclasses import dataclass
 from itertools import combinations
+import logging
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, TYPE_CHECKING
 
 from django.conf import settings
@@ -20,17 +21,16 @@ from pairs.constants import (
 )
 from pairs.models import Pair
 
-from longshort.services.metrics import (
-    CandleUniverse,
-    compute_pair_window_metrics,
-    load_candles_for_universe_from_supabase,
-)
+from longshort.services.metrics import CandleUniverse, compute_pair_window_metrics
+from longshort.services.candles_loader import load_candles_for_universe
 
 if TYPE_CHECKING:  # pragma: no cover - type hints only
     from pairs.models import UserMetricsConfig
 
 
 BASE_WINDOW = DEFAULT_BASE_WINDOW
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -157,6 +157,7 @@ def scan_pair_windows(
     thresholds: Thresholds | None = None,
     *,
     metrics_config: "UserMetricsConfig" | None = None,
+    max_age_seconds: int | None = None,
 ) -> Dict[str, Any]:
     """
     Evaluate the configured windows for a pair (Grid B) and persist the summary on the model.
@@ -164,11 +165,45 @@ def scan_pair_windows(
     resolved_windows = _resolve_windows(windows, metrics_config)
     thresholds = thresholds or get_thresholds(config=metrics_config)
 
+    # Attempt short-cache reuse
+    if (
+        max_age_seconds
+        and pair.scan_cache_json
+        and pair.scan_cached_at
+        and (timezone.now() - pair.scan_cached_at).total_seconds() <= max_age_seconds
+    ):
+        cached_scan = pair.scan_cache_json.get("scan") if isinstance(pair.scan_cache_json, dict) else None
+        if cached_scan and cached_scan.get("windows") == resolved_windows:
+            cached_rows = []
+            for r in cached_scan.get("rows", []):
+                cached_rows.append(
+                    WindowRow(
+                        window=r.get("window"),
+                        adf_pct=r.get("adf_pct"),
+                        adf_pvalue=r.get("adf_pvalue"),
+                        beta=r.get("beta"),
+                        zscore=r.get("zscore"),
+                        half_life=r.get("half_life"),
+                        corr30=r.get("corr30"),
+                        corr60=r.get("corr60"),
+                        status=r.get("status"),
+                        message=r.get("message"),
+                    )
+                )
+            best_window = cached_scan.get("best_window")
+            best_row = next((row for row in cached_rows if row.window == best_window and row.status == "ok"), None)
+            return {
+                "rows": cached_rows,
+                "best": best_row,
+                "windows": resolved_windows,
+                "thresholds": thresholds,
+            }
+
     candles: CandleUniverse | None = None
     if resolved_windows:
         max_window = max(resolved_windows)
         try:
-            candles = load_candles_for_universe_from_supabase(
+            candles = load_candles_for_universe(
                 [pair.left_id, pair.right_id],
                 lookback_windows=max_window,
             )
@@ -316,9 +351,12 @@ def _compute_base_for_pair(
         ready = bool(metrics.get("ready_for_approval"))
         skip_reason = metrics.get("skip_reason")
         if getattr(settings, "PAIRS_DEBUG_LOG", False):
-            print(
-                f"pair={label} compute_ms={(compute_end - compute_start)*1000:.1f} "
-                f"ready={ready} skip_reason={skip_reason}"
+            logger.debug(
+                "pair=%s compute_ms=%.1f ready=%s skip_reason=%s",
+                label,
+                (compute_end - compute_start) * 1000,
+                ready,
+                skip_reason,
             )
 
         if not ready:
@@ -406,7 +444,8 @@ def build_pairs_base(
             Q(left_id__in=asset_ids, right_id__in=asset_ids)
         ).only("id", "left_id", "right_id", "scan_cache_json", "scan_cached_at")
         for existing in pairs_qs:
-            existing_pairs[(existing.left_id, existing.right_id)] = existing
+            key = tuple(sorted((existing.left_id, existing.right_id)))
+            existing_pairs[key] = existing
     processed = 0
 
     created = 0
@@ -418,11 +457,11 @@ def build_pairs_base(
     thresholds = thresholds or get_thresholds(config=metrics_config)
 
     candles_for_assets: "CandleUniverse" | None = None
-    if load_candles_for_universe_from_supabase is not None and assets:
+    if assets:
         asset_ids = [asset.id for asset in assets]
         if asset_ids:
             try:
-                candles_for_assets = load_candles_for_universe_from_supabase(
+                candles_for_assets = load_candles_for_universe(
                     asset_ids,
                     lookback_windows=window,
                 )
@@ -444,7 +483,7 @@ def build_pairs_base(
                 }
             )
 
-        key = (left.id, right.id)
+        key = tuple(sorted((left.id, right.id)))
         existing_pair = existing_pairs.get(key)
         was_created = False
         temp_pair = existing_pair or Pair(left=left, right=right, base_window=window)
@@ -515,8 +554,8 @@ def build_pairs_base(
     if progress_cb:
         progress_cb({"phase": "done", "i": processed, "total": total, "window": window})
     t2 = time.perf_counter()
-    print("fetch_universe_ms =", (t1 - t0) * 1000)
-    print("total_compute_ms  =", (t2 - t1) * 1000)
+    if getattr(settings, "PAIRS_DEBUG_LOG", False):
+        logger.debug("fetch_universe_ms=%.1f total_compute_ms=%.1f", (t1 - t0) * 1000, (t2 - t1) * 1000)
 
     return {
         "created": created,

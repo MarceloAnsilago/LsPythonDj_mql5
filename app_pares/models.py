@@ -6,6 +6,10 @@ from pairs.models import Pair
 
 
 class PriceHistory(models.Model):
+    """
+    DEPRECATED: espelho redundante de preços diários.
+    Preferir cotacoes.QuoteDaily como fonte única; mantido apenas para compatibilidade temporária.
+    """
     asset = models.ForeignKey(
         Asset,
         on_delete=models.CASCADE,

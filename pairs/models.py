@@ -30,6 +30,23 @@ class Pair(models.Model):
     def __str__(self) -> str:
         return f"{self.left.ticker} - {self.right.ticker}"
 
+    def _canonicalize_order(self) -> None:
+        if self.left_id and self.right_id and self.left_id > self.right_id:
+            self.left_id, self.right_id = self.right_id, self.left_id
+
+    def save(self, *args, **kwargs):
+        self._canonicalize_order()
+        super().save(*args, **kwargs)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["left", "right"], name="pairs_pair_left_right_unique"),
+        ]
+        indexes = [
+            models.Index(fields=["left", "right"]),
+            models.Index(fields=["scan_cached_at"]),
+        ]
+
 
 class UserMetricsConfig(models.Model):
     user = models.OneToOneField(

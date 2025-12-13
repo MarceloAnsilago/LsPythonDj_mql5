@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import date
-from decimal import Decimal
 from typing import Iterable, List
 import logging
 
@@ -10,11 +9,10 @@ from django.db import transaction
 
 from acoes.models import Asset
 from longshort.services.quotes import bulk_update_quotes
-from longshort.services.price_provider import get_daily_prices
 from pairs.models import Pair
 from pairs.services.scan import WindowRow, scan_pair_windows
 
-from .models import PairScanResult, PriceHistory
+from .models import PairScanResult
 
 LOGGER = logging.getLogger(__name__)
 
@@ -53,53 +51,6 @@ def atualizar_cotacoes(
     }
 
 
-def _sync_price_history(dia: date) -> dict[str, int]:
-    """
-    Mantem a tabela PriceHistory alinhada com a fonte diaria (QuoteDaily ou DailyPrice).
-    """
-    assets = list(Asset.objects.filter(is_active=True))
-    created = 0
-    updated = 0
-    records = 0
-
-    for asset in assets:
-        prices = get_daily_prices(asset, start_date=dia, end_date=dia)
-        if not prices:
-            continue
-        row = prices[-1]
-        close_px = row.get("close")
-        if close_px is None:
-            continue
-
-        defaults = {
-            "close": Decimal(str(close_px)),
-            "source": "QuoteDaily",
-        }
-        _, was_created = PriceHistory.objects.update_or_create(
-            asset=asset,
-            date=dia,
-            defaults=defaults,
-        )
-        records += 1
-        if was_created:
-            created += 1
-        else:
-            updated += 1
-    LOGGER.info(
-        "PriceHistory %s: registros=%d criados=%d atualizados=%d",
-        dia,
-        records,
-        created,
-        updated,
-    )
-    return {
-        "date": dia.isoformat(),
-        "records": records,
-        "created": created,
-        "updated": updated,
-    }
-
-
 def _row_to_dict(row: WindowRow | None) -> dict | None:
     if row is None:
         return None
@@ -117,7 +68,7 @@ def _row_to_dict(row: WindowRow | None) -> dict | None:
     }
 
 
-def rodar_scan_pares(dia: date, *, pairs: Iterable[Pair] | None = None) -> dict:
+def rodar_scan_pares(dia: date, *, pairs: Iterable[Pair] | None = None, dry_run: bool = False) -> dict:
     """
     Executa o scanner de janelas e persiste os resultados por par e data.
     """
@@ -132,8 +83,11 @@ def rodar_scan_pares(dia: date, *, pairs: Iterable[Pair] | None = None) -> dict:
             rows = [_row_to_dict(row) for row in scan_payload.get("rows", [])]
             best_row = _row_to_dict(scan_payload.get("best"))
             thresholds = scan_payload.get("thresholds")
+            if dry_run:
+                continue
+
             with transaction.atomic():
-                obj, was_created = PairScanResult.objects.update_or_create(
+                _, was_created = PairScanResult.objects.update_or_create(
                     pair=pair,
                     run_date=dia,
                     defaults={
@@ -163,13 +117,39 @@ def rodar_scan_pares(dia: date, *, pairs: Iterable[Pair] | None = None) -> dict:
     }
 
 
-def rodar_scan_diario(dia: date, *, use_stooq: bool = False, logger: logging.Logger | None = None) -> dict:
+def rodar_scan_diario(
+    dia: date,
+    *,
+    use_stooq: bool = False,
+    logger: logging.Logger | None = None,
+    enable_history: bool = False,
+    skip_quotes: bool = False,
+    skip_scan: bool = False,
+    dry_run: bool = False,
+) -> dict:
     log = logger or LOGGER
     log.info("Iniciando scan diario para %s", dia)
-    quote_summary = atualizar_cotacoes(dia, use_stooq=use_stooq)
-    history_summary = _sync_price_history(dia)
-    scan_summary = rodar_scan_pares(dia)
-    log.info("Scan diario %s concluido (pares=%s)", dia, scan_summary["pairs_processed"])
+    quote_summary = None
+    history_summary = None
+    scan_summary = None
+
+    if not skip_quotes:
+        quote_summary = atualizar_cotacoes(dia, use_stooq=use_stooq)
+    else:
+        log.info("Skip de atualizacao de cotacoes (--skip-quotes).")
+
+    if enable_history:
+        # DEPRECATED: PriceHistory nao e atualizada por padrao.
+        log.info("PriceHistory desativado por padrao; enable_history=True solicitado, mas etapa removida nesta fase.")
+    else:
+        log.info("PriceHistory desativado (enable_history=False).")
+
+    if not skip_scan:
+        scan_summary = rodar_scan_pares(dia, dry_run=dry_run)
+    else:
+        log.info("Skip de scan de pares (--skip-scan).")
+
+    log.info("Scan diario %s concluido (pares=%s)", dia, scan_summary["pairs_processed"] if scan_summary else 0)
     return {
         "date": dia.isoformat(),
         "quotes": quote_summary,
