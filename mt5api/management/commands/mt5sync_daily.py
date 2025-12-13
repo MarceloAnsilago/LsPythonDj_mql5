@@ -4,6 +4,8 @@ from datetime import datetime, time, date
 
 from django.core.management import call_command
 from django.core.management.base import BaseCommand, CommandError
+from django.db import models
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from acoes.models import Asset
@@ -19,6 +21,12 @@ class Command(BaseCommand):
             "--date",
             dest="date",
             help="Data alvo no formato YYYY-MM-DD. Padrao: hoje (fuso local).",
+        )
+        parser.add_argument(
+            "--min-ticks",
+            type=int,
+            default=2,
+            help="Quantidade minima de ticks para considerar um ativo valido (default: 2).",
         )
 
     def handle(self, *args, **options) -> None:
@@ -47,21 +55,39 @@ class Command(BaseCommand):
             self.stdout.write("Nenhum ativo marcado com use_mt5=True.")
             return
 
+        min_ticks = max(1, int(options.get("min_ticks") or 2))
+
+        ticks_qs = (
+            LiveTick.objects.annotate(effective_dt=Coalesce("as_of", "timestamp"))
+            .filter(
+                models.Q(as_of__isnull=False, as_of__gte=start_dt, as_of__lte=end_dt)
+                | models.Q(as_of__isnull=True, timestamp__gte=start_dt, timestamp__lte=end_dt),
+            )
+            .values("ticker")
+            .annotate(count=models.Count("id"))
+        )
+        tick_counts = {row["ticker"]: row["count"] for row in ticks_qs}
+
+        daily_map: dict[int, QuoteDaily] = {}
+        for qd in QuoteDaily.objects.select_related("asset").filter(date=target_date):
+            # QuoteDaily tem unique_together (asset, date); manter ultimo caso haja lixo.
+            daily_map[qd.asset_id] = qd
+
         warnings: list[str] = []
         ok_count = 0
 
         for asset in assets:
-            tick_count = LiveTick.objects.filter(
-                ticker=asset.ticker,
-                timestamp__gte=start_dt,
-                timestamp__lte=end_dt,
-            ).count()
-            daily = QuoteDaily.objects.filter(asset=asset, date=target_date).first()
+            tick_count = tick_counts.get(asset.ticker, 0)
+            daily = daily_map.get(asset.id)
             if daily is None:
-                warnings.append(f"{asset.ticker}: sem QuoteDaily para {target_date} (ticks={tick_count})")
+                warnings.append(
+                    f"{asset.ticker}: sem QuoteDaily para {target_date} (ticks={tick_count}, min_ticks={min_ticks}, source=daily)"
+                )
                 continue
-            if tick_count < 2:
-                warnings.append(f"{asset.ticker}: poucos ticks ({tick_count}) para {target_date}")
+            if tick_count < min_ticks:
+                warnings.append(
+                    f"{asset.ticker}: poucos ticks ({tick_count}<min_ticks={min_ticks}) para {target_date} (source=ticks)"
+                )
             else:
                 ok_count += 1
 

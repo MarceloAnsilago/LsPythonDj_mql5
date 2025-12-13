@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Tuple
 
 from django.conf import settings
+from django.core.cache import cache
 from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime, parse_date
@@ -22,27 +23,41 @@ from pairs.models import Pair
 
 
 def _client_ip(request) -> str | None:
-    forwarded = request.META.get("HTTP_X_FORWARDED_FOR")
+    fly_ip = (request.META.get("HTTP_FLY_CLIENT_IP") or "").strip()
+    if fly_ip:
+        return fly_ip
+    forwarded = request.META.get("HTTP_X_FORWARDED_FOR") or request.headers.get("X-Forwarded-For")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        parts = [p.strip() for p in str(forwarded).split(",") if p.strip()]
+        for part in parts:
+            if part.lower() != "unknown":
+                return part
     return request.META.get("REMOTE_ADDR")
 
 
-def _auth_error(message: str, status: int = 401) -> JsonResponse:
-    return JsonResponse({"ok": False, "detail": message}, status=status)
+def _error_response(message: str, *, status: int = 400, code: str = "ERROR") -> JsonResponse:
+    return JsonResponse({"ok": False, "error_code": code, "detail": message}, status=status)
+
+
+def _auth_error(message: str, *, status: int = 401, code: str = "UNAUTHORIZED") -> JsonResponse:
+    return _error_response(message, status=status, code=code)
 
 
 def _ensure_api_auth(request):
     expected_key = getattr(settings, "MT5_API_KEY", None)
     provided_key = request.headers.get("X-API-KEY") or request.META.get("HTTP_X_API_KEY")
-    if expected_key and expected_key.strip():
+    if not settings.DEBUG and (not expected_key or not str(expected_key).strip()):
+        return _auth_error("MT5_API_KEY nao configurada (DEBUG=False).", status=401, code="MISSING_API_KEY")
+    if expected_key and str(expected_key).strip():
         if not provided_key or provided_key.strip() != expected_key.strip():
-            return _auth_error("API key invalida.", status=401)
+            return _auth_error("API key invalida.", status=401, code="UNAUTHORIZED")
     allowed_ips = getattr(settings, "MT5_ALLOWED_IPS", []) or []
     if allowed_ips:
         ip = _client_ip(request)
-        if ip and ip not in allowed_ips:
-            return _auth_error("IP nao autorizado.", status=403)
+        if not ip:
+            return _auth_error("IP nao autorizado.", status=403, code="FORBIDDEN_IP")
+        if ip not in allowed_ips:
+            return _auth_error("IP nao autorizado.", status=403, code="FORBIDDEN_IP")
     return None
 
 
@@ -94,9 +109,11 @@ def _latest_daily_price(asset: Asset) -> Tuple[float | None, object | None]:
 
 
 def _current_price(asset: Asset) -> Tuple[float | None, object | None, str | None]:
-    quote = getattr(asset, "live_quote", None)
-    if not quote:
-        quote = QuoteLive.objects.filter(asset=asset).first()
+    quote = (
+        QuoteLive.objects.filter(asset=asset)
+        .order_by("-as_of", "-updated_at")
+        .first()
+    )
 
     price = None
     as_of = None
@@ -113,7 +130,6 @@ def _current_price(asset: Asset) -> Tuple[float | None, object | None, str | Non
     return price, as_of, source or "mt5"
 
 
-@csrf_exempt
 @require_http_methods(["GET"])
 def stream_assets(request):
     auth_error = _ensure_api_auth(request)
@@ -124,8 +140,11 @@ def stream_assets(request):
     qs = qs.filter(use_mt5=True)
 
     tickers = [a.ticker.strip().upper() for a in qs if getattr(a, "ticker", "").strip()]
-    body = "\n".join(sorted(set(tickers)))
-    return HttpResponse(body, content_type="text/plain; charset=utf-8")
+    unique_tickers = sorted(set(tickers))
+    body = "\n".join(unique_tickers)
+    response = HttpResponse(body, content_type="text/plain; charset=utf-8")
+    response["X-Assets-Count"] = str(len(unique_tickers))
+    return response
 
 
 @csrf_exempt
@@ -139,11 +158,11 @@ def push_live_quote(request):
         body = request.body.decode("utf-8") if request.body else "{}"
         data = json.loads(body or "{}")
     except json.JSONDecodeError:
-        return JsonResponse({"ok": False, "detail": "JSON invalido."}, status=400)
+        return _error_response("JSON invalido.", status=400, code="INVALID_JSON")
 
     asset = _resolve_asset(data)
     if not asset:
-        return JsonResponse({"ok": False, "detail": "Ativo nao encontrado."}, status=404)
+        return _error_response("Ativo nao encontrado.", status=404, code="ASSET_NOT_FOUND")
 
     bid = _safe_float(data.get("bid"))
     ask = _safe_float(data.get("ask"))
@@ -153,7 +172,7 @@ def push_live_quote(request):
     if price is None and bid is not None and ask is not None:
         price = (bid + ask) / 2.0
     if price is None:
-        return JsonResponse({"ok": False, "detail": "Preco invalido ou ausente."}, status=400)
+        return _error_response("Preco invalido ou ausente.", status=400, code="INVALID_PRICE")
 
     as_of = _parse_as_of(data.get("as_of"))
     source = (data.get("source") or "mt5").lower()
@@ -175,6 +194,8 @@ def push_live_quote(request):
         bid=bid,
         ask=ask,
         last=recorded_last,
+        as_of=as_of,
+        source=source,
     )
 
     return JsonResponse(
@@ -184,6 +205,8 @@ def push_live_quote(request):
             "ticker": asset.ticker,
             "as_of": as_of.isoformat(),
             "received_at": timezone.now().isoformat(),
+            "price": price,
+            "source": source,
         }
     )
 
@@ -203,22 +226,22 @@ def push_daily_candle(request):
         body = request.body.decode("utf-8") if request.body else "{}"
         data = json.loads(body or "{}")
     except json.JSONDecodeError:
-        return JsonResponse({"ok": False, "detail": "JSON invalido."}, status=400)
+        return _error_response("JSON invalido.", status=400, code="INVALID_JSON")
 
     asset = _resolve_asset(data)
     if not asset or not getattr(asset, "use_mt5", False):
-        return JsonResponse({"ok": False, "detail": "Ativo nao encontrado ou nao usa MT5."}, status=404)
+        return _error_response("Ativo nao encontrado ou nao usa MT5.", status=404, code="ASSET_NOT_FOUND")
 
     ticker = asset.ticker.strip().upper()
     target_date = parse_date(str(data.get("date")))
     if target_date is None:
-        return JsonResponse({"ok": False, "detail": "Data invalida."}, status=400)
+        return _error_response("Data invalida.", status=400, code="INVALID_DATE")
     if target_date >= timezone.localdate():
-        return JsonResponse({"ok": False, "detail": "Apenas candles D1 fechados (date < hoje)."}, status=400)
+        return _error_response("Apenas candles D1 fechados (date < hoje).", status=400, code="INVALID_DATE")
 
     c = _safe_float(data.get("close") or data.get("last") or data.get("price"))
     if c is None:
-        return JsonResponse({"ok": False, "detail": "Preco de fechamento obrigatorio."}, status=400)
+        return _error_response("Preco de fechamento obrigatorio.", status=400, code="INVALID_PRICE")
 
     QuoteDaily.objects.update_or_create(
         asset=asset,
@@ -236,7 +259,6 @@ def push_daily_candle(request):
     )
 
 
-@csrf_exempt
 @require_http_methods(["GET"])
 def get_signal(request):
     auth_error = _ensure_api_auth(request)
@@ -247,7 +269,7 @@ def get_signal(request):
     try:
         pair_id = int(pair_id_raw)
     except (TypeError, ValueError):
-        return JsonResponse({"ok": False, "detail": "pair_id obrigatorio."}, status=400)
+        return _error_response("pair_id obrigatorio.", status=400, code="MISSING_PAIR_ID")
 
     pair = (
         Pair.objects.select_related("left", "right")
@@ -255,7 +277,7 @@ def get_signal(request):
         .first()
     )
     if not pair:
-        return JsonResponse({"ok": False, "detail": "Par nao encontrado."}, status=404)
+        return _error_response("Par nao encontrado.", status=404, code="PAIR_NOT_FOUND")
 
     window_raw = request.GET.get("window")
     half_life_max = _safe_float(request.GET.get("half_life_max"))
@@ -299,7 +321,11 @@ def get_signal(request):
             }
         )
 
-    metrics = compute_pair_window_metrics(pair=pair, window=window)
+    cache_key = f"mt5api:pair_metrics:{pair.id}:{window}"
+    metrics = cache.get(cache_key)
+    if metrics is None:
+        metrics = compute_pair_window_metrics(pair=pair, window=window)
+        cache.set(cache_key, metrics, timeout=10)
     zscore = metrics.get("zscore") if isinstance(metrics, dict) else None
     half_life = metrics.get("half_life") if isinstance(metrics, dict) else None
 

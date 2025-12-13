@@ -1,15 +1,20 @@
+from datetime import timedelta
+
 import pandas as pd
 from django.contrib import admin
 from django.template.response import TemplateResponse
 from django.urls import path
+from django.utils import timezone
 from django.utils.dateparse import parse_date
+
+from cotacoes.models import QuoteDaily
 
 from .models import DailyPrice, DailyPricePivot, LiveTick
 
 
 @admin.register(LiveTick)
 class LiveTickAdmin(admin.ModelAdmin):
-    list_display = ("ticker", "timestamp", "bid", "ask", "last")
+    list_display = ("ticker", "timestamp", "as_of", "bid", "ask", "last", "source")
     list_filter = ("ticker",)
     search_fields = ("ticker",)
     ordering = ("-timestamp",)
@@ -54,20 +59,23 @@ class DailyPricePivotAdmin(admin.ModelAdmin):
         start_dt = parse_date(start_raw) if start_raw else None
         end_dt = parse_date(end_raw) if end_raw else None
 
-        qs = DailyPrice.objects.all()
+        qs = QuoteDaily.objects.select_related("asset").all()
         if ticker:
-            qs = qs.filter(ticker__iexact=ticker)
+            qs = qs.filter(asset__ticker__iexact=ticker)
         if start_dt:
             qs = qs.filter(date__gte=start_dt)
+        elif not end_dt:
+            default_start = timezone.localdate() - timedelta(days=120)
+            qs = qs.filter(date__gte=default_start)
         if end_dt:
             qs = qs.filter(date__lte=end_dt)
 
-        df = pd.DataFrame(list(qs.values("date", "ticker", "close")))
+        df = pd.DataFrame(list(qs.values("date", "asset__ticker", "close")))
         pivot_cols = []
         pivot_rows = []
         if not df.empty:
             df["date"] = pd.to_datetime(df["date"])
-            df["ticker"] = df["ticker"].str.upper()
+            df["ticker"] = df["asset__ticker"].str.upper()
             pivot = (
                 df.pivot(index="date", columns="ticker", values="close")
                   .sort_index(ascending=False)

@@ -11,6 +11,8 @@ class LiveTick(models.Model):
     bid = models.FloatField(null=True, blank=True)
     ask = models.FloatField(null=True, blank=True)
     last = models.FloatField()
+    as_of = models.DateTimeField(null=True, blank=True, db_index=True)
+    source = models.CharField(max_length=16, default="mt5", db_index=True)
 
     class Meta:
         ordering = ["-timestamp"]
@@ -23,7 +25,10 @@ class LiveTick(models.Model):
 
 
 class DailyPrice(models.Model):
-    """OHLC diario consolidado a partir dos ticks."""
+    """
+    DEPRECATED: OHLC diario consolidado a partir dos ticks (MT5) ou fallback Yahoo.
+    Preferir cotacoes.QuoteDaily; manter apenas para compatibilidade ate convergir para fonte unica.
+    """
 
     ticker = models.CharField(max_length=10)
     date = models.DateField()
