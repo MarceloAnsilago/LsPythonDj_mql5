@@ -5,46 +5,101 @@
 <style>
   .asset-table-card {
     border-radius: 24px;
-    border: 1px solid rgba(0, 0, 0, 0.08);
-    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    background: #fff;
+    box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
     overflow: hidden;
   }
 
   .asset-table-card .table {
-    border-bottom: 0;
-    margin-bottom: 0;
     border-collapse: separate;
     border-spacing: 0;
   }
 
   .asset-table-card thead {
-    background: #f4f7ff;
+    background: linear-gradient(90deg, #e0edff, #f8f4ff);
   }
 
   .asset-table-card thead th {
     font-weight: 600;
-    color: #1f2937;
+    color: #0f172a;
     border-bottom: none;
-    padding: 1rem 0.75rem;
+    padding: 1.1rem 0.85rem;
+    text-transform: uppercase;
+    font-size: 0.85rem;
+    letter-spacing: 0.04em;
   }
 
   .asset-table-card tbody tr {
     border-bottom: 1px solid rgba(15, 23, 42, 0.05);
-    background: rgba(248, 250, 255, 0.7);
+    background: #fff;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
   }
 
   .asset-table-card tbody tr:hover {
-    background: rgba(59, 130, 246, 0.07);
+    background: #eef2ff;
+    transform: translateY(-2px);
+    box-shadow: 0 10px 16px rgba(99, 102, 241, 0.15);
+  }
+
+  .asset-table-card tbody td {
+    border-top: none;
+    padding: 0.9rem 0.85rem;
+    vertical-align: middle;
   }
 
   .asset-actions {
-    gap: 0.5rem;
+    gap: 0.4rem;
   }
 
   .asset-actions a {
     text-decoration: none;
-    font-size: 0.85rem;
+    font-size: 0.82rem;
     padding: 0.35rem 0.85rem;
+  }
+
+  .asset-table-card tbody td small {
+    color: #475569;
+  }
+
+  .status-chip {
+    padding: 0.25rem 0.8rem;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .asset-logo {
+    width: 44px;
+    height: 44px;
+    border-radius: 14px;
+    border: 1px solid rgba(15, 23, 42, 0.1);
+    background: linear-gradient(135deg, #eef2ff, #fdf2f8);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .asset-logo img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    border-radius: inherit;
+    z-index: 1;
+  }
+
+  .asset-logo span {
+    font-size: 0.65rem;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    font-weight: 700;
+    color: #0f172a;
+    z-index: 0;
   }
 </style>
 {% endblock %}
@@ -81,27 +136,51 @@
     <table class="table align-middle mb-0 table-borderless">
       <thead class="table-light">
         <tr>
-          <th>Ticker</th><th>Nome</th><th>YF</th><th>Status</th>
+          <th class="text-center">Logo</th><th>Ticker</th><th>Nome</th><th>YF</th><th>Status</th>
           <th class="text-center">Fav</th><th class="text-end">Ações</th>
         </tr>
       </thead>
       <tbody>
         {% for a in object_list %}
         <tr class="bg-white">
-          <td><span class="fw-semibold">{{ a.ticker }}</span></td>
-          <td>{{ a.name }}</td>
+          <td class="text-center">
+            <div class="asset-logo" role="img" aria-label="{{ a.name }} logo">
+              <img src="https://raw.githubusercontent.com/thefintz/icones-b3/main/icones/{{ a.ticker|upper }}.png"
+                   alt="{{ a.ticker }} logo"
+                   loading="lazy"
+                   onerror="this.remove();">
+              <span>{{ a.logo_key }}</span>
+            </div>
+          </td>
+          <td>
+            <div class="d-flex flex-column gap-1">
+              <span class="fw-semibold text-dark fs-6">{{ a.ticker }}</span>
+              <small class="text-muted">ID {{ a.id }}</small>
+            </div>
+          </td>
+          <td>
+            <div class="d-flex flex-column gap-1">
+              <span class="fw-semibold">{{ a.name }}</span>
+              <small class="text-muted">
+                {% if a.use_mt5 %}Sincroniza MT5{% else %}Base Yahoo{% endif %}
+              </small>
+            </div>
+          </td>
           <td>
             {% if a.ticker_yf %}
               <a href="https://finance.yahoo.com/quote/{{ a.ticker_yf|urlencode }}" target="_blank" rel="noopener" class="text-decoration-none">
                 <code>{{ a.ticker_yf }}</code>
+                <span class="badge text-bg-primary ms-1">YF</span>
               </a>
+            {% else %}
+              <span class="text-muted small">sem ticker YF</span>
             {% endif %}
           </td>
           <td>
             {% if a.is_active %}
-              <span class="badge text-bg-success">Ativa</span>
+              <span class="status-chip text-bg-success text-white">Ativa</span>
             {% else %}
-              <span class="badge text-bg-secondary">Inativa</span>
+              <span class="status-chip text-bg-secondary text-white">Inativa</span>
             {% endif %}
           </td>
           <td class="text-center">
@@ -111,8 +190,12 @@
           </td>
           <td class="text-end">
             <div class="d-flex asset-actions">
-              <a class="btn btn-sm btn-outline-primary" href="{% url 'acoes:editar' a.id %}">Editar</a>
-              <a class="btn btn-sm btn-outline-danger" href="{% url 'acoes:excluir' a.id %}">Excluir</a>
+              <a class="btn btn-sm btn-outline-primary" href="{% url 'acoes:editar' a.id %}">
+                <i class="bi bi-pencil-fill me-1" aria-hidden="true"></i>Editar
+              </a>
+              <a class="btn btn-sm btn-outline-danger" href="{% url 'acoes:excluir' a.id %}">
+                <i class="bi bi-trash3-fill me-1" aria-hidden="true"></i>Excluir
+              </a>
             </div>
           </td>
         </tr>

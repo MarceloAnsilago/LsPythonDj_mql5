@@ -438,6 +438,7 @@ def _build_home_operations_payload(request):
                     "buy": _asset_info_url(operation.buy_asset),
                 },
                 "current_balance_value": current_balance_value,
+                "pl_total": pl_total,
                 "entry_net_direction": entry_net_direction,
             }
         )

@@ -2,8 +2,55 @@
 {% load static %}
 {% load widget_tweaks %}
 
+{% block extra_head %}
+<style>
+  .asset-logo-inline {
+    width: 52px;
+    height: 52px;
+    min-width: 52px;
+    border-radius: 16px;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    background: linear-gradient(135deg, #eef2ff, #fdf2f8);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    font-size: 0.65rem;
+    color: #0f172a;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .asset-logo-inline img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    border-radius: inherit;
+  }
+</style>
+{% endblock %}
+
 {% block content %}
-<h2 class="mb-3">{{ view.object|yesno:"Editar Ativo,Novo Ativo" }}</h2>
+<div class="d-flex align-items-center gap-3 mb-3">
+  {% if view.object and view.object.ticker %}
+    <div class="asset-logo-inline" aria-label="{{ view.object.name }} logo">
+      <img src="https://raw.githubusercontent.com/thefintz/icones-b3/main/icones/{{ view.object.ticker|upper }}.png"
+           alt="{{ view.object.ticker }} logo"
+           loading="lazy"
+           onerror="this.remove();">
+      <span>{{ view.object.ticker }}</span>
+    </div>
+  {% else %}
+    <div class="asset-logo-inline" aria-hidden="true">
+      <span>LOGO</span>
+    </div>
+  {% endif %}
+  <h2 class="mb-0">{{ view.object|yesno:"Editar Ativo,Novo Ativo" }}</h2>
+</div>
 
 <form method="post" class="card p-3 p-md-4 shadow-sm rounded-3">
   {% csrf_token %}
