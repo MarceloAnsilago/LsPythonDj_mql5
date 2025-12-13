@@ -4,10 +4,12 @@ __pycache__/
 *$py.class
 *.pyo
 
-# --- Virtualenv ---
+# --- Virtualenv / env files ---
 venv/
-.env/
 .venv/
+# Ignore arquivos reais de env (mantém .env.example versionado)
+.env
+.env.*
 
 # --- Django ---
 *.log
@@ -34,7 +36,7 @@ Thumbs.db
 .coverage
 .coverage.*
 htmlcov/
-pytest_cache/
+.pytest_cache/
 .tox/
 
 # --- Node (se existir tooling futuro) ---
@@ -42,6 +44,15 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# --- Python build/packaging/caches ---
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
 
 # --- Backup/Temp ---
 *.bak
@@ -51,4 +62,3 @@ yarn-error.log*
 ~$*
 
 comandos.txt
-
