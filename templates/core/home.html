@@ -57,6 +57,27 @@
 
 {% endblock %}
 
+{% block extra_head %}
+<style>
+.home-current-price.home-price-blink {
+  animation: homePriceBlink 0.8s ease;
+}
+
+@keyframes homePriceBlink {
+  0% {
+    background-color: rgba(13, 110, 253, 0.18);
+    border-radius: 4px;
+  }
+  50% {
+    background-color: transparent;
+  }
+  100% {
+    background-color: rgba(13, 110, 253, 0.18);
+  }
+}
+</style>
+{% endblock %}
+
 {% block extra_js %}
 <script>
 document.addEventListener("DOMContentLoaded", () => {
@@ -122,6 +143,38 @@ document.addEventListener("DOMContentLoaded", () => {
       '<div class="alert alert-warning small mb-0">Nao foi possivel carregar as operacoes agora. Tente novamente em alguns segundos.</div>';
   };
 
+  const capturePrices = () => {
+    const snapshot = new Map();
+    if (!container) {
+      return snapshot;
+    }
+    container.querySelectorAll("[data-home-price]").forEach((el) => {
+      const key = el.getAttribute("data-home-price");
+      if (key) {
+        snapshot.set(key, el.textContent.trim());
+      }
+    });
+    return snapshot;
+  };
+
+  const highlightPriceChanges = (previousSnapshot) => {
+    if (!container || !previousSnapshot || previousSnapshot.size === 0) {
+      return;
+    }
+    container.querySelectorAll("[data-home-price]").forEach((el) => {
+      const key = el.getAttribute("data-home-price");
+      if (!key) {
+        return;
+      }
+      const prevValue = previousSnapshot.get(key);
+      const currentValue = el.textContent.trim();
+      if (prevValue && prevValue !== currentValue) {
+        el.classList.add("home-price-blink");
+        window.setTimeout(() => el.classList.remove("home-price-blink"), 900);
+      }
+    });
+  };
+
   const attachAlertRefresh = () => {
     const alertBtn = document.getElementById("home-refresh-live-alert-btn");
     if (alertBtn && refreshBtn) {
@@ -133,6 +186,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!container || !dataUrl) {
       return;
     }
+    const previousPrices = capturePrices();
     renderLoading();
     fetch(dataUrl, {
       headers: {
@@ -149,6 +203,7 @@ document.addEventListener("DOMContentLoaded", () => {
       .then((payload) => {
         if (payload && payload.html) {
           container.innerHTML = payload.html;
+          highlightPriceChanges(previousPrices);
           attachAlertRefresh();
         } else {
           throw new Error("Resposta invalida.");

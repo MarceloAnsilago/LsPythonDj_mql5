@@ -1,8 +1,8 @@
 # LsPythonDj – MT5 + Yahoo (híbrido)
 
-- MT5 é a fonte principal para preço ao vivo/intraday e candles D1 fechados; Yahoo (yfinance) só entra como fallback de histórico (ativos novos ou buracos). Nenhum dado intraday é gravado em `DailyPrice` (apenas D1 `< hoje`).
-- Modelos-chave: `mt5api.LiveTick` (tick cru), `mt5api.DailyPrice` (OHLC D1 MT5 ou fallback Yahoo), `cotacoes.QuoteLive` (preço ao vivo por ativo) e `cotacoes.QuoteDaily` (legado/fallback visual).
-- Views/serviços: `longshort/services/mt5_provider.py` (bridge HTTP MT5), `longshort/services/quotes.py` (live + histórico MT5/Yahoo), `longshort/services/price_provider.py` (fonte unificada D1), `/api/mt5/push-live-quote/` (entrada de ticks), `/api/mt5/push-daily/` (entrada OHLC D1).
+- Yahoo (yfinance) é a fonte única persistida para candles D1 fechados e histórico diário; MT5 permanece só para ticks/live e visualização intraday via `QuoteLive` e `LiveTick`.
+- Modelos-chave: `mt5api.LiveTick` (tick cru), `cotacoes.QuoteLive` (preço ao vivo por ativo), `cotacoes.QuoteDaily` (fonte oficial dos candles D1 com dados Yahoo) e `mt5api.DailyPrice` (legado/compatibilidade).
+- Views/serviços: `longshort/services/mt5_provider.py` (bridge HTTP MT5), `longshort/services/quotes.py` (live + histórico com Yahoo), `longshort/services/price_provider.py` (fonte unificada D1), `/api/mt5/push-live-quote/` (entrada de ticks) e `/api/mt5/push-daily/` (mantido só por compatibilidade).
 
 ## Live MT5 (entrada principal)
 - Endpoint: `POST /api/mt5/push-live-quote/`
@@ -13,15 +13,15 @@
 ## Push D1 MT5
 - Endpoint: `POST /api/mt5/push-daily/`
 - Payload exemplo: `{"ticker":"PETR4","date":"2025-01-11","open":37.0,"high":38.0,"low":36.5,"close":37.5}`
-- Somente aceita `date < hoje`; grava/atualiza `mt5api.DailyPrice`.
+- Somente aceita `date < hoje`; atualmente retorna erro informando que o histórico D1 é mantido via Yahoo.
 
 ## Consolidação diária (D1 fechado)
-- Comando: `python manage.py mt5sync_daily --date YYYY-MM-DD` (ou `agg_daily_prices` direto) **sempre com data < hoje**. Consolida `LiveTick` em `DailyPrice` (OHLC) por ticker MT5.
-- Página “Cotações” e cards usam `get_daily_prices` para D1; intraday é apenas visual (DOM/polling) via `QuoteLive/MT5` e não persiste em D1.
+- Comando: `python manage.py mt5sync_daily --date YYYY-MM-DD` **sempre com data < hoje**; apenas valida ticks recebidos e alerta, pois a consolidação MT5 foi desativada (`agg_daily_prices` agora só mostra o aviso). `QuoteDaily` vem do Yahoo.
+- Página “Cotações” e cards usam `get_daily_prices` para D1 (dados Yahoo); intraday continua apenas visual (DOM/polling) via `QuoteLive/MT5` sem persistência D1.
 
-## Yahoo como fallback
-- `ensure_min_history_for_asset` e `bulk_update_quotes` recorrem ao Yahoo para preencher histórico fechado que faltar (ativos novos ou buracos), gravando em `DailyPrice` (somente data < hoje).
-- Ativos `use_mt5=True` usam MT5 como fonte primária; Yahoo só entra quando o D1 MT5 não cobre o mínimo exigido.
+## Yahoo como fonte oficial
+- `ensure_min_history_for_asset` e `bulk_update_quotes` garantem `QuoteDaily` via Yahoo (datas < hoje), cobrindo histórico e buracos.
+- Ativos `use_mt5=True` continuam recebendo ticks live via MT5, mas os candles D1 exibidos e armazenados seguem vindo do Yahoo, com logs de faltantes ajudando a detectar falhas.
 
 ### Teste rápido (Yahoo / CCRO3)
 ```
@@ -41,6 +41,6 @@ curl -X POST http://127.0.0.1:8000/api/mt5/push-live-quote/ \
   -H "Content-Type: application/json" \
   -d '{"ticker":"PETR4","last":37.11}'
 
-python manage.py agg_daily_prices --date 2025-01-11
+python manage.py agg_daily_prices --date 2025-01-11  # somente informa que a consolidação MT5 foi desativada
 python manage.py shell -c "from mt5api.models import LiveTick, DailyPrice; print(LiveTick.objects.count()); print(DailyPrice.objects.count())"
 ```

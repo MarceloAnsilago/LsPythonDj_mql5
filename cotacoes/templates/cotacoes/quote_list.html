@@ -10,16 +10,6 @@
       </div>
 
       <div class="d-flex gap-2">
-        <!-- Atualizar cotações do dia (MT5 -> QuoteDaily provisório) -->
-        <form id="formUpdateToday" method="post" action="{% url 'cotacoes:save_today' %}">
-          {% csrf_token %}
-          <button type="submit" id="btnUpdateToday" class="btn btn-outline-primary">
-            <span class="spinner-border spinner-border-sm me-2 d-none" id="spUpdateToday" role="status" aria-hidden="true"></span>
-            <i class="bi bi-arrow-clockwise" id="icoUpdateToday"></i>
-            <span id="txtUpdateToday">Atualizar cotações do dia</span>
-          </button>
-        </form>
-
         <!-- Baixar histórico faltante (Yahoo/MT5) -->
         <form method="post" action="{% url 'cotacoes:download_history' %}">
           {% csrf_token %}
@@ -157,22 +147,6 @@
 <!-- Script do spinner -->
 <script>
 document.addEventListener('DOMContentLoaded', function () {
-  const btn = document.getElementById('btnUpdateToday');
-  if (!btn) return;
-
-  const sp  = document.getElementById('spUpdateToday');
-  const ico = document.getElementById('icoUpdateToday');
-  const txt = document.getElementById('txtUpdateToday');
-
-  btn.addEventListener('click', function () {
-    // mostra spinner e desabilita botão imediatamente
-    sp.classList.remove('d-none');
-    if (ico) ico.classList.add('d-none');
-    if (txt) txt.textContent = 'Atualizando...';
-    btn.classList.add('disabled');
-    btn.setAttribute('aria-disabled', 'true');
-  }, { passive: true });
-
   // Clique no ticker do log -> joga no filtro
   const filterInput = document.getElementById('filterTickers');
   const filterForm = document.getElementById('filterForm');

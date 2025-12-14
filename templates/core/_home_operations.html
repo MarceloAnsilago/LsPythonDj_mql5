@@ -263,8 +263,17 @@
                           <td class="text-end">{{ item.entry.prices.buy_qty_label }}</td>
 
                           <td class="text-end small">
-                            <div class="fw-semibold">{{ item.current.prices.buy_price_label }}</div>
-                            <div class="text-body-tertiary small">Total {{ item.current.prices.buy_total_label }}</div>
+                            <div class="fw-semibold">
+                              <span class="home-current-price" data-home-price="buy-{{ item.operation.buy_asset.ticker|upper }}-price">
+                                {{ item.current.prices.buy_price_label }}
+                              </span>
+                            </div>
+                            <div class="text-body-tertiary small">
+                              Total
+                              <span class="home-current-price" data-home-price="buy-{{ item.operation.buy_asset.ticker|upper }}-total">
+                                {{ item.current.prices.buy_total_label }}
+                              </span>
+                            </div>
                           </td>
 
                           <td class="text-end">{{ item.current.prices.buy_pl_label }}</td>
@@ -278,8 +287,17 @@
                           <td class="text-end">{{ item.entry.prices.sell_qty_label }}</td>
 
                           <td class="text-end small">
-                            <div class="fw-semibold">{{ item.current.prices.sell_price_label }}</div>
-                            <div class="text-body-tertiary small">Total {{ item.current.prices.sell_total_label }}</div>
+                            <div class="fw-semibold">
+                              <span class="home-current-price" data-home-price="sell-{{ item.operation.sell_asset.ticker|upper }}-price">
+                                {{ item.current.prices.sell_price_label }}
+                              </span>
+                            </div>
+                            <div class="text-body-tertiary small">
+                              Total
+                              <span class="home-current-price" data-home-price="sell-{{ item.operation.sell_asset.ticker|upper }}-total">
+                                {{ item.current.prices.sell_total_label }}
+                              </span>
+                            </div>
                           </td>
 
                           <td class="text-end">{{ item.current.prices.sell_pl_label }}</td>

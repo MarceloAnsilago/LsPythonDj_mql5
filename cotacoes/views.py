@@ -24,7 +24,6 @@ from longshort.services.price_provider import get_daily_prices
 from longshort.services.quotes import (
     bulk_update_quotes,
     scan_all_assets_and_fix,
-    persist_today_provisional_from_live_quotes,
     find_missing_dates_for_asset,
     try_fetch_single_date,
     ensure_min_history_for_all_assets,
@@ -134,12 +133,13 @@ def update_quotes(request: HttpRequest):
     n_mt5_assets, n_mt5_rows = bulk_update_quotes(mt5_assets, period="2y", interval="1d")
 
     total_rows = rows_seeded + n_base_rows + n_mt5_rows
+    total_yahoo_assets = n_base_assets + n_mt5_assets
+    total_yahoo_rows = n_base_rows + n_mt5_rows
 
     messages.success(
         request,
         f"Histórico garantido (200 barras mín.): {assets_seeded} ativos / {rows_seeded} linhas; "
-        f"Cotações salvas (Yahoo): {n_base_assets} ativos, {n_base_rows} linhas; "
-        f"Cotações D1 MT5: {n_mt5_assets} ativos, {n_mt5_rows} linhas. "
+        f"Cotações salvas (Yahoo): {total_yahoo_assets} ativos, {total_yahoo_rows} linhas. "
         f"Total inserido: {total_rows} linhas."
     )
     return redirect(reverse_lazy("cotacoes:home"))
@@ -196,12 +196,13 @@ def update_quotes_ajax(request: HttpRequest):
     n_mt5_assets, n_mt5_rows = bulk_update_quotes(mt5_assets, period="2y", interval="1d")
 
     total_rows = rows_seeded + n_base_rows + n_mt5_rows
+    total_yahoo_assets = n_base_assets + n_mt5_assets
+    total_yahoo_rows = n_base_rows + n_mt5_rows
 
     messages.success(
         request,
         f"Histórico garantido (200 barras mín.): {assets_seeded} ativos / {rows_seeded} linhas; "
-        f"Cotações salvas (Yahoo): {n_base_assets} ativos, {n_base_rows} linhas; "
-        f"Cotações D1 MT5: {n_mt5_assets} ativos, {n_mt5_rows} linhas. "
+        f"Cotações salvas (Yahoo): {total_yahoo_assets} ativos, {total_yahoo_rows} linhas. "
         f"Total inserido: {total_rows} linhas."
     )
     _progress_set(request.user.id, ticker="", index=n_base_assets, total=base_assets.count(), status="done", rows=total_rows)
@@ -221,20 +222,6 @@ def update_live_quotes_view(request: HttpRequest):
     messages.success(request, f"Cotações ao vivo atualizadas: {n_updated}/{n_total} ativos.")
     return redirect("cotacoes:home")
 
-
-@login_required
-@require_POST
-def save_today_quotes_view(request: HttpRequest):
-    """
-    Atualiza cotações de hoje (data=hoje) em QuoteDaily usando QuoteLive (MT5).
-    Sobrescreve/atualiza a linha do dia como provisória.
-    """
-    assets_updated, rows_created = persist_today_provisional_from_live_quotes()
-    messages.success(
-        request,
-        f"Cotações de hoje atualizadas: {assets_updated} ativos, {rows_created} linhas."
-    )
-    return redirect("cotacoes:home")
 
 
 @login_required

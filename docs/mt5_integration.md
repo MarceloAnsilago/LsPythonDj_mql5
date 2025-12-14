@@ -1,12 +1,12 @@
 # Integracao MT5 no LongShort
 
-- MT5 é a fonte principal (live/intraday + D1 fechado). Intraday não persiste em `QuoteDaily/DailyPrice`.
-- Yahoo permanece apenas como fallback para histórico faltante/ativos novos (grava em `QuoteDaily`), sempre com data < hoje.
+- Yahoo (yfinance) é a fonte oficial para candles D1 fechados (datas < hoje); MT5 continua entregando ticks live/intraday via `QuoteLive` e `LiveTick` sem persistir D1.
+- O histórico completo é mantido em `cotacoes.QuoteDaily`; `mt5api.DailyPrice` continua disponível apenas para compatibilidade legada.
 
 ## Ativar MT5 para um ativo
 - Marque `use_mt5=True` no cadastro de `Asset` (admin ou formulario do app).
-- Quando marcado, o ativo **nao** usa Yahoo para intraday; Yahoo só é chamado para backfill se faltar histórico fechado.
-- Pivot, analises e metricas passam a ler `mt5api.DailyPrice` em vez de `cotacoes.QuoteDaily`.
+- Quando marcado, o ativo passa a receber ticks live via MT5/QuoteLive; o intraday não é persistido e o Yahoo continua abastecendo o histórico D1.
+- Pivot, analises e metricas continuam lendo `cotacoes.QuoteDaily` (Yahoo); `mt5api.DailyPrice` fica apenas para compatibilidade administrativa.
 
 ## Entrada de ticks (tempo real)
 - Endpoint: `POST /api/mt5/push-live-quote/`
@@ -20,18 +20,14 @@
   - `LiveTick` (um registro por tick recebido)
 
 ## Consolidacao diaria (OHLC)
-- Comando base: `python manage.py agg_daily_prices --date YYYY-MM-DD` (use sempre data < hoje).
-- Consolida todos os `LiveTick` do dia por ticker:
-  - `open`: primeiro tick do dia (`last`)
-  - `close`: ultimo tick do dia
-  - `high`/`low`: maximas e minimas do dia
-- Resultado e salvo em `mt5api.DailyPrice` via `update_or_create`.
+- Comando base: `python manage.py agg_daily_prices --date YYYY-MM-DD` (use sempre data < hoje) apenas informa que a consolidação MT5 foi desativada.
+- Os ticks MT5 seguem sendo gravados em `LiveTick`, mas os candles D1 são mantidos via Yahoo em `cotacoes.QuoteDaily`.
 
-## Provedor de precos unificado
+-## Provedor de precos unificado
 - Arquivo: `longshort/services/price_provider.py`
 - Funcao: `get_daily_prices(asset, start_date, end_date)` retorna lista ordenada de dicts `{date, open, high, low, close}`.
-  - Se `asset.use_mt5=True` -> le `mt5api.DailyPrice`.
-  - Caso contrario -> usa `cotacoes.QuoteDaily` (replicando OHLC com `close`).
+  - Usa `cotacoes.QuoteDaily` para todos os ativos (todos os candles D1 fechados vêm do Yahoo).
+  - `mt5api.DailyPrice` segue disponível apenas para compatibilidade administrativa.
 - Toda a camada de metricas, pivots e `/api/mt5/get-signal/` passou a consumir esta funcao.
 
 ## Relatorios no admin
@@ -40,15 +36,14 @@
   - Filtros: `ticker`, `data inicial`, `data final`
   - Renderiza tabela dinamica (datas x tickers) com `close` consolidado.
 
-## Historico oficial com MT5
+## Historico oficial
 - Ativos `use_mt5=True`:
-  - D1 principal em `DailyPrice` via MT5 (ticks agregados ou HTTP).
-  - Yahoo só entra como fallback (QuoteDaily) para buracos/ativos novos.
-  - `PriceHistory` (app_pares) também é sincronizado a partir de `DailyPrice`.
+  - D1 principal em `cotacoes.QuoteDaily` via Yahoo (datas < hoje); os ticks MT5 continuam gerando `QuoteLive`/`LiveTick`.
+  - Yahoo garante o histórico completo; os logs de faltantes ajudam a detectar falhas pontuais.
+  - `PriceHistory` (app_pares) mantém compatibilidade sincronizando com `QuoteDaily`.
 
 ## Rotina diaria recomendada
 1. Receber ticks via `push-live-quote` ao longo do dia.
 2. Consolidar e validar:
-   - `python manage.py mt5sync_daily --date YYYY-MM-DD` (sempre data < hoje)
-   - Esse comando roda `agg_daily_prices`, verifica se todos `use_mt5=True` tem `DailyPrice` e alerta se houver poucos/nenhum tick.
-3. Executar fluxos de pares/estrategia normalmente; as metricas usarao `DailyPrice` para ativos MT5.
+   - `python manage.py mt5sync_daily --date YYYY-MM-DD` (sempre data < hoje) apenas verifica ticks e avisa; `agg_daily_prices` hoje só exibe um aviso de que a consolidação MT5 foi desativada.
+3. Executar fluxos de pares/estrategia normalmente; as metricas usarao `cotacoes.QuoteDaily` (Yahoo) para todos os ativos.

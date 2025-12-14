@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 """
-Fluxo hibrido MT5 + Yahoo:
-- MT5 e fonte principal para intraday/live e historico D1 quando disponivel.
-- Yahoo (yfinance) fica apenas como fallback para historico faltante/ativos novos.
-- Intraday nao persiste em QuoteDaily; apenas candles D1 fechados (data < hoje).
-  Excecao opcional: persist_today_provisional_from_live_quotes grava hoje com
-  is_provisional=True quando chamada explicitamente.
+Fluxo Yahoo + MT5 live:
+- Yahoo (yfinance) e a fonte unica persistida para QuoteDaily (dias < hoje).
+- Intraday/tempo real segue vindo via MT5/QuoteLive sem gravar candles no banco.
 """
 
 import time
@@ -44,13 +41,7 @@ class MissingReason:
     YAHOO_TICKER_MISSING = "yahoo_ticker_missing"
     YAHOO_HISTORY_ERROR = "yahoo_history_error"
     YAHOO_HISTORY_EMPTY = "yahoo_history_empty"
-    YAHOO_FALLBACK_SKIPPED = "yahoo_fallback_skipped"
-    YAHOO_FALLBACK_ERROR = "yahoo_fallback_error"
-    YAHOO_FALLBACK_EMPTY = "yahoo_fallback_empty"
-    YAHOO_FALLBACK = "yahoo_fallback"
     YAHOO_ERROR = "yahoo_error"
-    MT5_HISTORY_ERROR = "mt5_history_error"
-    MT5_NO_DATA = "mt5_no_data"
 
 
 def _safe_float(value: object) -> float | None:
@@ -304,9 +295,7 @@ def ensure_daily_history(asset: Asset, start=None, end=None, lookback_days: int 
 
 def ensure_min_history_for_asset(asset: Asset, min_bars: int = MIN_HISTORY_BARS) -> int:
     """
-    Garante historico minimo fechado (data < hoje) para o ativo.
-    - use_mt5=True: tenta MT5; se faltar, usa Yahoo como fallback.
-    - use_mt5=False: usa somente Yahoo em QuoteDaily.
+    Garante historico minimo fechado (data < hoje) para o ativo via Yahoo.
     Retorna o numero de linhas gravadas (criadas + atualizadas).
     """
     cache_key = f"min_history_seed_asset_{getattr(asset, 'id', 'none')}"
@@ -317,7 +306,6 @@ def ensure_min_history_for_asset(asset: Asset, min_bars: int = MIN_HISTORY_BARS)
 
     ticker = (getattr(asset, "ticker", "") or "").strip().upper()
     today = _today_local()
-    use_mt5 = bool(getattr(asset, "use_mt5", False))
 
     existing = QuoteDaily.objects.filter(asset=asset, date__lt=today).count()
     if existing >= min_bars:
@@ -328,54 +316,29 @@ def ensure_min_history_for_asset(asset: Asset, min_bars: int = MIN_HISTORY_BARS)
     start_dt = today - timedelta(days=lookback_days)
     end_dt = today - timedelta(days=1)
 
-    total_written = 0
-    current_daily = existing
-
-    if use_mt5 and ticker:
-        mt5_series = _fetch_history_with_retry(
-            MT5QuoteProvider(),
-            asset=asset,
-            reason_on_error=MissingReason.MT5_HISTORY_ERROR,
-            detail_label="MT5",
-            ticker=ticker,
-            start=start_dt,
-            end=end_dt,
-            timeframe="D",
-        )
-        created, updated = ingest_daily_series(asset, mt5_series, today=today, mode="update_if_changed")
-        total_written += created + updated
-        current_daily += created
-        if current_daily >= min_bars:
-            cache.set(cache_key, True, timeout=3600)
-            return total_written
-
     yahoo_ticker = _ticker_for_yahoo(asset)
     if not yahoo_ticker:
-        _log_missing(asset, MissingReason.YAHOO_FALLBACK_SKIPPED, "Ticker Yahoo ausente/delistado (mapeamento)")
+        _log_missing(asset, MissingReason.YAHOO_TICKER_MISSING, "Ticker Yahoo ausente/delistado (mapeamento)")
         cache.set(cache_key, True, timeout=3600)
-        return total_written
+        return 0
 
     yahoo_series = _fetch_history_with_retry(
         YahooQuoteProvider(),
         asset=asset,
-        reason_on_error=MissingReason.YAHOO_FALLBACK_ERROR,
-        detail_label="Yahoo fallback",
+        reason_on_error=MissingReason.YAHOO_HISTORY_ERROR,
+        detail_label="Yahoo",
         ticker=yahoo_ticker,
         start=start_dt,
         end=end_dt,
     )
     if yahoo_series is None or getattr(yahoo_series, "empty", True):
-        _log_missing(asset, MissingReason.YAHOO_FALLBACK_EMPTY, "Nenhum dado retornado pelo Yahoo (ensure_min_history_for_asset)")
-        return total_written
+        _log_missing(asset, MissingReason.YAHOO_HISTORY_EMPTY, "Nenhum dado retornado pelo Yahoo (ensure_min_history_for_asset)")
+        return 0
 
     created, updated = ingest_daily_series(asset, yahoo_series, today=today, mode="update_if_changed")
-    total_written += created + updated
-    current_daily += created
+    total_written = created + updated
 
-    if created + updated > 0 and use_mt5:
-        _log_missing(asset, MissingReason.YAHOO_FALLBACK, f"Backfill inserido via Yahoo: {created} criadas, {updated} atualizadas")
-
-    if current_daily >= min_bars:
+    if existing + created >= min_bars:
         cache.set(cache_key, True, timeout=3600)
 
     return total_written
@@ -411,13 +374,9 @@ def bulk_update_quotes(
     use_stooq: bool = False,  # mantido na assinatura para compat, ignorado
 ) -> tuple[int, int]:
     """
-    Atualiza cotacoes diarias fechadas.
-    - use_mt5=True: MT5 em QuoteDaily; fallback Yahoo tambem grava em QuoteDaily.
-    - use_mt5=False: Yahoo (yfinance) em QuoteDaily.
-    Apenas datas < hoje sao persistidas.
-    Retorna: (n_ativos_modificados, n_linhas_gravadas).
+    Atualiza cotacoes diarias fechadas apenas via Yahoo (dias < hoje).
+    Retorna (n_ativos_modificados, n_linhas_gravadas).
     """
-    provider = MT5QuoteProvider()
     yahoo = YahooQuoteProvider()
     assets = list(assets)
     total_assets = len(assets)
@@ -449,7 +408,6 @@ def bulk_update_quotes(
             _call_progress(progress_cb, "", idx, total_assets, "skip_invalid", 0)
             continue
 
-        use_mt5 = bool(getattr(asset, "use_mt5", False))
         _call_progress(progress_cb, ticker, idx, total_assets, "processing", 0)
 
         last_dt = QuoteDaily.objects.filter(asset=asset, date__lt=today).aggregate(Max("date"))["date__max"]
@@ -461,58 +419,27 @@ def bulk_update_quotes(
 
         rows_written = 0
 
-        if use_mt5:
-            series = _fetch_history_with_retry(
-                provider,
-                asset=asset,
-                reason_on_error=MissingReason.MT5_HISTORY_ERROR,
-                detail_label="MT5",
-                ticker=ticker,
-                start=start_dt,
-                end=end_dt,
-                timeframe="D",
-            )
-            created, updated = ingest_daily_series(asset, series, today=today, mode="update_if_changed")
-            rows_written += created + updated
+        yahoo_ticker = _ticker_for_yahoo(asset)
+        if not yahoo_ticker:
+            _log_missing(asset, MissingReason.YAHOO_TICKER_MISSING, "Ticker Yahoo ausente/delistado (mapeamento)")
+            _call_progress(progress_cb, ticker, idx, total_assets, "no_data", 0)
+            continue
 
-            if rows_written == 0:
-                _log_missing(asset, MissingReason.MT5_NO_DATA, f"Nenhum dado retornado pelo MT5 para {ticker}")
-                yahoo_ticker = _ticker_for_yahoo(asset)
-                if yahoo_ticker:
-                    try:
-                        y_series = _fetch_history_with_retry(
-                            yahoo,
-                            asset=asset,
-                            reason_on_error=MissingReason.YAHOO_ERROR,
-                            detail_label="Yahoo fallback",
-                            ticker=yahoo_ticker,
-                            start=start_dt,
-                            end=end_dt,
-                        )
-                    except Exception:
-                        y_series = None
-                    c2, u2 = ingest_daily_series(asset, y_series, today=today, mode="update_if_changed")
-                    rows_written += c2 + u2
-                    if c2 + u2 > 0:
-                        _log_missing(asset, MissingReason.YAHOO_FALLBACK, f"Backfill inserido via Yahoo: {c2} criadas, {u2} atualizadas")
-                else:
-                    _log_missing(asset, MissingReason.YAHOO_TICKER_MISSING, "Ticker Yahoo ausente/delistado (mapeamento)")
-        else:
-            yahoo_ticker = _ticker_for_yahoo(asset)
-            if yahoo_ticker:
-                y_series = _fetch_history_with_retry(
-                    yahoo,
-                    asset=asset,
-                    reason_on_error=MissingReason.YAHOO_ERROR,
-                    detail_label="Yahoo",
-                    ticker=yahoo_ticker,
-                    start=start_dt,
-                    end=end_dt,
-                )
-                created, updated = ingest_daily_series(asset, y_series, today=today, mode="update_if_changed")
-                rows_written += created + updated
-            else:
-                _log_missing(asset, MissingReason.YAHOO_TICKER_MISSING, "Ticker Yahoo ausente/delistado (mapeamento)")
+        series = _fetch_history_with_retry(
+            yahoo,
+            asset=asset,
+            reason_on_error=MissingReason.YAHOO_HISTORY_ERROR,
+            detail_label="Yahoo",
+            ticker=yahoo_ticker,
+            start=start_dt,
+            end=end_dt,
+        )
+        if series is None or getattr(series, "empty", True):
+            _log_missing(asset, MissingReason.YAHOO_HISTORY_EMPTY, f"Nenhum dado retornado pelo Yahoo para {ticker}")
+            _call_progress(progress_cb, ticker, idx, total_assets, "no_data", 0)
+            continue
+        created, updated = ingest_daily_series(asset, series, today=today, mode="update_if_changed")
+        rows_written += created + updated
 
         if rows_written > 0:
             total_rows += rows_written
@@ -525,44 +452,6 @@ def bulk_update_quotes(
 
     return assets_with_writes, total_rows
 
-
-# ============================================================
-# Provisorio do dia (usa QuoteLive para gravar QuoteDaily hoje)
-# ============================================================
-def persist_today_provisional_from_live_quotes(assets=None) -> tuple[int, int]:
-    """
-    Gera/atualiza QuoteDaily para a data de hoje usando QuoteLive (apenas MT5).
-    - Marca como is_provisional=True
-    - Sobrescreve apenas se o registro atual ainda for provisorio
-    Retorna (ativos_atualizados, linhas_gravadas).
-    """
-    today = _today_local()
-    qs = assets or Asset.objects.filter(is_active=True, use_mt5=True)
-    assets_updated = 0
-    rows_updated = 0
-
-    for asset in qs:
-        live = QuoteLive.objects.filter(asset=asset).order_by("-as_of").first()
-        if live is None:
-            continue
-        price = getattr(live, "price", None) or getattr(live, "last", None)
-        price_val = _safe_float(price)
-        if price_val is None:
-            continue
-
-        created, updated = ingest_daily_series(
-            asset,
-            {today: price_val},
-            today=today,
-            allow_today=True,
-            is_provisional=True,
-            mode="update_if_changed",
-        )
-        if created + updated > 0:
-            rows_updated += created + updated
-            assets_updated += 1
-
-    return assets_updated, rows_updated
 
 
 # ============================================================

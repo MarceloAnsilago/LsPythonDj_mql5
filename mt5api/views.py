@@ -14,7 +14,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from acoes.models import Asset
-from cotacoes.models import QuoteLive, QuoteDaily
+from cotacoes.models import QuoteLive
 from longshort.services.price_provider import get_daily_prices
 from longshort.services.quotes import apply_live_quote
 from .models import LiveTick
@@ -270,8 +270,8 @@ def push_live_quote(request):
 @require_http_methods(["POST"])
 def push_daily_candle(request):
     """
-    Recebe OHLC D1 fechado do MT5 e grava em QuoteDaily.
-    Rejeita datas de hoje ou futuras.
+    Endpoint presente apenas para compatibilidade. Dados recebidos nao sao persistidos.
+    QuoteDaily agora e mantido exclusivamente via Yahoo (dias < hoje).
     """
     auth_error = _ensure_api_auth(request)
     if auth_error:
@@ -298,19 +298,10 @@ def push_daily_candle(request):
     if c is None:
         return _error_response("Preco de fechamento obrigatorio.", status=400, code="INVALID_PRICE")
 
-    QuoteDaily.objects.update_or_create(
-        asset=asset,
-        date=target_date,
-        defaults={"close": c, "is_provisional": False},
-    )
-
-    return JsonResponse(
-        {
-            "ok": True,
-            "ticker": ticker,
-            "date": target_date.isoformat(),
-            "source": "mt5_push",
-        }
+    return _error_response(
+        "Persistência de candles D1 via MT5 está desativada; use Yahoo para manter QuoteDaily.",
+        status=400,
+        code="MT5_DAILY_DISABLED"
     )
 
 
